@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useStore } from '../context/store';
 import { DEFAULT_CATEGORIES } from '../types';
 import Header from '../components/Header';
+import { nairaToKobo } from '../utils';
 import { Camera, Check, Sparkles } from 'lucide-react';
 
 export default function AddExpensePage() {
@@ -28,7 +29,7 @@ export default function AddExpensePage() {
     addTransaction({
       userId: 'user',
       type,
-      amount: Number(amount),
+      amountInKobo: nairaToKobo(Number(amount)),
       category,
       description: description || cat?.name || category,
       date: new Date().toISOString(),
@@ -49,7 +50,7 @@ export default function AddExpensePage() {
               <Check size={32} className="text-primary-600" strokeWidth={2.5} />
             </div>
             <p className="text-lg font-bold text-navy-900">Recorded!</p>
-            <p className="text-sm text-surface-400 mt-1">Your budget has been updated</p>
+            <p className="text-sm text-surface-500 mt-1">Your budget has been updated</p>
           </div>
         </div>
       </>
@@ -60,14 +61,14 @@ export default function AddExpensePage() {
     <>
       <Header title="Add Transaction" showBack />
 
-      <div className="px-5 py-4 space-y-5 pb-8">
+      <div className="px-5 py-4 space-y-5 pb-8 lg:px-10 lg:max-w-3xl">
         <div className="flex gap-2 bg-surface-100 p-1 rounded-xl">
           {(['expense', 'income'] as const).map(t => (
             <button
               key={t}
               onClick={() => { setType(t); setCategory(''); }}
               className={`flex-1 py-2.5 rounded-lg text-sm font-semibold transition-all ${
-                type === t ? 'bg-white text-navy-900 shadow-card' : 'text-surface-400'
+                type === t ? 'bg-white text-navy-900 shadow-card' : 'text-surface-500'
               }`}
             >
               {t === 'expense' ? 'Money out' : 'Money in'}
@@ -111,7 +112,7 @@ export default function AddExpensePage() {
 
         <div>
           <label className="section-label mb-2 block">Category</label>
-          <div className="grid grid-cols-3 gap-2">
+          <div className="grid grid-cols-3 gap-2 lg:grid-cols-4">
             {filteredCategories.map(cat => (
               <button
                 key={cat.id}
@@ -137,7 +138,7 @@ export default function AddExpensePage() {
           </div>
           <div className="text-left flex-1">
             <p className="text-sm font-semibold text-navy-900">Scan a receipt instead</p>
-            <p className="text-xs text-surface-400">We'll pull out the items for you to confirm</p>
+            <p className="text-xs text-surface-500">We'll pull out the items for you to confirm</p>
           </div>
         </button>
 
@@ -149,7 +150,7 @@ export default function AddExpensePage() {
           Record {type === 'expense' ? 'Expense' : 'Income'}
         </button>
 
-        <p className="text-[11px] text-surface-400 text-center leading-relaxed">
+        <p className="text-[11px] text-surface-500 text-center leading-relaxed">
           Everything you add here is used for real calculations — safe to spend, budget
           adjustments and coach advice all read from this record.
         </p>

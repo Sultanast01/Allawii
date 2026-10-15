@@ -12,22 +12,22 @@ export default function GroupsPage() {
     <div>
       <Header title="Group Contributions" showBack />
 
-      <div className="px-5 pt-5 space-y-4">
-        <div>
+      <div className="px-5 pt-5 pb-8 space-y-4 lg:px-10 lg:grid lg:grid-cols-2 lg:gap-8 lg:space-y-0 lg:content-start">
+        <div className="lg:col-span-2">
           <p className="text-[11px] font-semibold tracking-wider text-primary-600 uppercase mb-1">Shared money</p>
           <h1 className="text-2xl font-bold text-navy-900">Campus group ledger</h1>
           <p className="text-sm text-surface-500 mt-0.5">Track roommates, class projects and dues transparently.</p>
         </div>
 
-        <div className="card p-4 flex gap-3 bg-primary-50/60 border-primary-100">
+        <div className="card p-4 flex gap-3 bg-primary-50/60 border-primary-100 lg:col-span-2">
           <Users size={16} className="text-primary-600 shrink-0 mt-0.5" />
           <p className="text-xs text-primary-800">Simulated ledger for the hackathon — no real money moves. Members can’t edit each other’s records.</p>
         </div>
 
-        <div className="space-y-3">
+        <div className="space-y-3 lg:col-span-2 lg:grid lg:grid-cols-2 lg:gap-5 lg:space-y-0 lg:items-start">
           {groups.map(g => {
-            const total = g.members.reduce((s, m) => s + m.contributed, 0);
-            const pct = g.target > 0 ? Math.min(100, (total / g.target) * 100) : 0;
+            const total = g.members.reduce((s, m) => s + m.contributedInKobo, 0);
+            const pct = g.targetInKobo > 0 ? Math.min(100, (total / g.targetInKobo) * 100) : 0;
             const open = expanded === g.id;
             return (
               <div key={g.id} className="card overflow-hidden">
@@ -37,7 +37,7 @@ export default function GroupsPage() {
                       <h3 className="font-bold text-navy-900">{g.name}</h3>
                       <p className="text-xs text-surface-500">{g.type} · due in {daysUntil(g.deadline)} days</p>
                     </div>
-                    <span className="text-sm font-bold text-navy-900">{formatNaira(total)}<span className="text-surface-400 font-normal text-xs">/{formatNaira(g.target)}</span></span>
+                    <span className="text-sm font-bold text-navy-900">{formatNaira(total)}<span className="text-surface-500 font-normal text-xs">/{formatNaira(g.targetInKobo)}</span></span>
                   </div>
                   <div className="h-2 bg-surface-100 rounded-full overflow-hidden">
                     <div className="h-full bg-primary-500 rounded-full transition-all" style={{ width: `${pct}%` }} />
@@ -46,7 +46,7 @@ export default function GroupsPage() {
                 {open && (
                   <div className="px-4 pb-4 space-y-2 border-t border-surface-100 pt-3 animate-fade-in">
                     {g.members.map(m => {
-                      const done = m.contributed >= m.expected;
+                      const done = m.contributedInKobo >= m.expectedInKobo;
                       return (
                         <div key={m.name} className="flex items-center gap-3">
                           <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold shrink-0 ${done ? 'bg-emerald-100 text-emerald-700' : 'bg-surface-100 text-surface-500'}`}>
@@ -54,12 +54,12 @@ export default function GroupsPage() {
                           </div>
                           <div className="flex-1">
                             <p className="text-sm font-medium text-navy-900">{m.name}</p>
-                            <p className="text-xs text-surface-500">{formatNaira(m.contributed)} of {formatNaira(m.expected)}</p>
+                            <p className="text-xs text-surface-500">{formatNaira(m.contributedInKobo)} of {formatNaira(m.expectedInKobo)}</p>
                           </div>
                           {done ? (
-                            <span className="text-xs text-emerald-600 font-semibold flex items-center gap-1"><Check size={13} /> Paid</span>
+                            <span className="text-xs text-emerald-700 font-semibold flex items-center gap-1"><Check size={13} /> Paid</span>
                           ) : (
-                            <button onClick={() => contributeToGroup(g.id, m.name, m.expected - m.contributed)} className="text-xs font-semibold text-primary-600 flex items-center gap-1"><Plus size={12} /> Settle</button>
+                            <button onClick={() => contributeToGroup(g.id, m.name, m.expectedInKobo - m.contributedInKobo)} className="text-xs font-semibold text-primary-600 flex items-center gap-1"><Plus size={12} /> Settle</button>
                           )}
                         </div>
                       );

@@ -32,7 +32,7 @@ export default function ScamPage() {
   };
 
   const levelStyles = {
-    low: { badge: 'bg-emerald-50 text-emerald-700 border-emerald-200', title: 'Looks low-risk', icon: 'text-emerald-600', bg: 'bg-emerald-50' },
+    low: { badge: 'bg-emerald-50 text-emerald-700 border-emerald-200', title: 'Looks low-risk', icon: 'text-emerald-700', bg: 'bg-emerald-50' },
     medium: { badge: 'bg-amber-50 text-amber-700 border-amber-200', title: 'Some warning signs', icon: 'text-amber-600', bg: 'bg-amber-50' },
     high: { badge: 'bg-orange-50 text-orange-700 border-orange-200', title: 'Many warning signs', icon: 'text-orange-600', bg: 'bg-orange-50' },
     severe: { badge: 'bg-red-50 text-red-700 border-red-200', title: 'High risk — be very careful', icon: 'text-red-600', bg: 'bg-red-50' },
@@ -42,14 +42,14 @@ export default function ScamPage() {
     <div>
       <Header title="Scam Safety Check" showBack />
 
-      <div className="px-5 pt-5 space-y-4">
-        <div>
+      <div className="px-5 pt-5 pb-8 space-y-4 lg:px-10 lg:grid lg:grid-cols-2 lg:gap-8 lg:space-y-0 lg:items-start">
+        <div className="lg:col-span-2">
           <p className="text-[11px] font-semibold tracking-wider text-primary-600 uppercase mb-1">Financial safety</p>
           <h1 className="text-2xl font-bold text-navy-900">Is this message safe?</h1>
           <p className="text-sm text-surface-500 mt-0.5">Paste a suspicious message and get a plain-language read.</p>
         </div>
 
-        <div className="card p-4">
+        <div className="card p-4 lg:col-start-1 lg:row-start-2">
           <textarea value={text} onChange={(e) => { setText(e.target.value); setResult(null); }} rows={5} placeholder="e.g. “Congratulations! You’ve won ₦500,000. Click this link and send ₦5,000 processing fee immediately. Don’t tell anyone.”" className="w-full text-sm text-navy-900 placeholder-surface-400 bg-transparent outline-none resize-none" />
           <button onClick={check} disabled={!text.trim() || loading} className="btn-primary w-full text-sm py-2.5 mt-2 flex items-center justify-center gap-2 disabled:opacity-50">
             {loading ? <><Loader2 size={16} className="animate-spin" /> Checking…</> : <><ShieldCheck size={16} /> Check message</>}
@@ -57,7 +57,7 @@ export default function ScamPage() {
         </div>
 
         {result && (
-          <div className="animate-slide-up space-y-3">
+          <div className="animate-slide-up space-y-3 lg:col-start-2 lg:row-start-2">
             <div className={`card p-5 border ${levelStyles[result.level].badge}`}>
               <div className="flex items-center gap-3 mb-2">
                 <div className={`w-11 h-11 rounded-xl flex items-center justify-center ${levelStyles[result.level].bg}`}>
@@ -87,9 +87,26 @@ export default function ScamPage() {
             <div className="card p-4 bg-primary-50/60 border-primary-100">
               <p className="text-xs text-primary-800 font-medium mb-1">What to do</p>
               <p className="text-xs text-primary-700 leading-relaxed">
-                Never share a PIN, password, OTP, BVN or card details. Verify through the official app or a number you already have — not a link in the message. Moneva can’t guarantee a message is safe; when in doubt, don’t send money.
+                Never share a PIN, password, OTP, BVN or card details. Verify through the official app or a number you already have — not a link in the message. Allawii can’t guarantee a message is safe; when in doubt, don’t send money.
               </p>
             </div>
+          </div>
+        )}
+
+        {!result && (
+          <div className="card p-5 lg:col-start-2 lg:row-start-2">
+            <p className="text-sm font-bold text-navy-900 mb-3">What the check looks for</p>
+            <div className="space-y-2.5">
+              {RED_FLAGS.map(f => (
+                <div key={f.label} className="flex gap-2.5">
+                  <AlertTriangle size={15} className="text-surface-500 shrink-0 mt-0.5" />
+                  <p className="text-sm text-surface-600">{f.label}</p>
+                </div>
+              ))}
+            </div>
+            <p className="text-[11px] text-surface-500 mt-4 leading-relaxed">
+              Rules run on this device — the message never leaves it. Flag counts map to low, medium, high and severe risk.
+            </p>
           </div>
         )}
       </div>

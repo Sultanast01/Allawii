@@ -3,8 +3,9 @@ export interface User {
   name: string;
   email: string;
   university?: string;
+  phoneNumber?: string;
   incomeFrequency: 'daily' | 'weekly' | 'monthly' | 'irregular';
-  typicalIncome: number;
+  typicalIncomeInKobo: number;
   nextIncomeDate?: string;
   createdAt: string;
 }
@@ -15,11 +16,11 @@ export interface Budget {
   period: 'daily' | 'weekly' | 'monthly' | 'custom';
   startDate: string;
   endDate: string;
-  totalIncome: number;
-  obligations: number;
-  essentials: number;
-  futureYou: number;
-  enjoyment: number;
+  totalIncomeInKobo: number;
+  obligationsInKobo: number;
+  essentialsInKobo: number;
+  futureYouInKobo: number;
+  enjoymentInKobo: number;
   isAutoAdjusted: boolean;
 }
 
@@ -27,7 +28,7 @@ export interface Transaction {
   id: string;
   userId: string;
   type: 'income' | 'expense' | 'transfer';
-  amount: number;
+  amountInKobo: number;
   category: string;
   description: string;
   date: string;
@@ -45,10 +46,10 @@ export interface SavingsGoal {
   id: string;
   userId: string;
   name: string;
-  targetAmount: number;
-  currentAmount: number;
+  targetAmountInKobo: number;
+  currentAmountInKobo: number;
   targetDate?: string;
-  contributionPerCycle: number;
+  contributionPerCycleInKobo: number;
   contributionFrequency: 'daily' | 'weekly' | 'monthly';
   progress: number;
   isPaused: boolean;
@@ -59,7 +60,7 @@ export interface Obligation {
   id: string;
   userId: string;
   name: string;
-  amount: number;
+  amountInKobo: number;
   frequency: 'daily' | 'weekly' | 'monthly' | 'once';
   nextDueDate: string;
   category: string;
@@ -80,7 +81,8 @@ export interface SavingsStreak {
   currentStreak: number;
   longestStreak: number;
   lastContributionDate?: string;
-  milestones: number[];
+  /** Local calendar days ('YYYY-MM-DD') on which money was added to a goal. Source of truth for the streak. */
+  contributionDates: string[];
 }
 
 export interface LiteracyLesson {
@@ -107,21 +109,21 @@ export interface StudentOffer {
 export interface WhatIfScenario {
   id: string;
   description: string;
-  expenseAmount: number;
+  expenseAmountInKobo: number;
   category: string;
-  impactOnBudget: number;
-  impactOnSavings: number;
-  newDailyLimit: number;
+  impactOnBudgetInKobo: number;
+  impactOnSavingsInKobo: number;
+  newDailyLimitInKobo: number;
   isAffordable: boolean;
   tradeoffs: string[];
 }
 
 export interface SafeToSpend {
-  totalAvailable: number;
-  reservedObligations: number;
-  reservedSavings: number;
-  unallocated: number;
-  dailyLimit: number;
+  totalAvailableInKobo: number;
+  reservedObligationsInKobo: number;
+  reservedSavingsInKobo: number;
+  unallocatedInKobo: number;
+  dailyLimitInKobo: number;
   daysUntilNextIncome: number;
   isEstimate: boolean;
 }
@@ -129,8 +131,8 @@ export interface SafeToSpend {
 export interface CategoryBudget {
   id: string;
   name: string;
-  allocated: number;
-  spent: number;
+  allocatedInKobo: number;
+  spentInKobo: number;
   bucket: BudgetBucket;
 }
 

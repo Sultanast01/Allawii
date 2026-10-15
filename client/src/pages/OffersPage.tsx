@@ -19,6 +19,7 @@ const categoryIcons: Record<string, string> = {
 
 export default function OffersPage() {
   const [filter, setFilter] = useState('all');
+  const [selectedOffer, setSelectedOffer] = useState<typeof STUDENT_OFFERS[number] | null>(null);
 
   const filtered = filter === 'all' ? STUDENT_OFFERS : STUDENT_OFFERS.filter(o => o.category === filter);
   const categories = ['all', 'food', 'transport', 'data', 'academics', 'entertainment'];
@@ -27,7 +28,7 @@ export default function OffersPage() {
     <>
       <Header title="Student Offers" showBack />
 
-      <div className="px-5 py-4 space-y-4 pb-8">
+      <div className="px-5 py-4 space-y-4 pb-8 lg:px-10">
         <div className="card p-4 bg-navy-800 border-navy-800 flex items-start gap-3">
           <div className="icon-tile bg-white/10">
             <GraduationCap size={18} className="text-white" />
@@ -41,7 +42,7 @@ export default function OffersPage() {
           </div>
         </div>
 
-        <div className="flex gap-2 overflow-x-auto scrollbar-hide -mx-5 px-5">
+        <div className="flex gap-2 overflow-x-auto scrollbar-hide -mx-5 px-5 lg:mx-0 lg:px-0 lg:flex-wrap">
           {categories.map(cat => (
             <button
               key={cat}
@@ -55,7 +56,7 @@ export default function OffersPage() {
           ))}
         </div>
 
-        <div className="space-y-3">
+        <div className="space-y-3 lg:grid lg:grid-cols-2 lg:gap-4 lg:space-y-0 lg:content-start">
           {filtered.map(offer => (
             <div key={offer.id} className="card p-4">
               <div className="flex items-start gap-3">
@@ -65,13 +66,13 @@ export default function OffersPage() {
                     <h3 className="font-semibold text-sm text-navy-900">{offer.title}</h3>
                     <span className="badge badge-success shrink-0">{offer.discount}</span>
                   </div>
-                  <p className="text-xs text-surface-400 mt-0.5">{offer.description}</p>
+                  <p className="text-xs text-surface-500 mt-0.5">{offer.description}</p>
                   <div className="flex items-center gap-1.5 mt-2 text-[11px] font-medium text-primary-600">
                     <Tag size={11} /> {offer.saves}
                   </div>
                   <div className="flex items-center justify-between mt-3 pt-3 border-t border-surface-100">
-                    <span className="text-[11px] text-surface-400">{offer.vendor}</span>
-                    <button className="text-primary-600 text-xs font-semibold flex items-center gap-1">
+                    <span className="text-[11px] text-surface-500">{offer.vendor}</span>
+                    <button onClick={() => setSelectedOffer(offer)} className="text-primary-600 text-xs font-semibold flex items-center gap-1">
                       View deal <ExternalLink size={11} />
                     </button>
                   </div>
@@ -81,11 +82,44 @@ export default function OffersPage() {
           ))}
         </div>
 
-        <p className="text-[11px] text-surface-400 text-center leading-relaxed">
+        <p className="text-[11px] text-surface-500 text-center leading-relaxed">
           Offer data is illustrative for the demo. A live build would pull verified,
           time-limited offers from partner vendors.
         </p>
       </div>
+
+      {selectedOffer && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-end sm:items-center justify-center p-4" onClick={() => setSelectedOffer(null)}>
+          <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full max-w-md p-6 space-y-4" onClick={e => e.stopPropagation()}>
+            <div className="flex items-start gap-3">
+              <span className="text-3xl">{categoryIcons[selectedOffer.category]}</span>
+              <div className="flex-1">
+                <h3 className="font-bold text-navy-900">{selectedOffer.title}</h3>
+                <p className="text-xs text-surface-500 mt-0.5">{selectedOffer.vendor}</p>
+              </div>
+              <span className="badge badge-success">{selectedOffer.discount}</span>
+            </div>
+
+            <p className="text-sm text-surface-600">{selectedOffer.description}</p>
+
+            <div className="bg-primary-50 rounded-xl p-3">
+              <p className="text-xs font-semibold text-primary-800">
+                You save {selectedOffer.saves}
+              </p>
+            </div>
+
+            <div className="bg-amber-50 border border-amber-100 rounded-xl p-3">
+              <p className="text-xs text-amber-900 leading-relaxed">
+                This is a demo offer. In a live build, this would redirect to the vendor's redemption page or apply the discount automatically via your student verification.
+              </p>
+            </div>
+
+            <button onClick={() => setSelectedOffer(null)} className="btn-primary w-full text-sm py-2.5">
+              Close
+            </button>
+          </div>
+        </div>
+      )}
     </>
   );
 }

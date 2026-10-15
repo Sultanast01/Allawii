@@ -1,16 +1,30 @@
-export function formatNaira(amount: number): string {
+/** Convert kobo to naira for display */
+export function koboToNaira(kobo: number): number {
+  return kobo / 100;
+}
+
+/** Convert naira to kobo for storage */
+export function nairaToKobo(naira: number): number {
+  return Math.round(naira * 100);
+}
+
+/** Format kobo as Naira currency string */
+export function formatNaira(amountInKobo: number): string {
+  const naira = koboToNaira(amountInKobo);
   return new Intl.NumberFormat('en-NG', {
     style: 'currency',
     currency: 'NGN',
     minimumFractionDigits: 0,
     maximumFractionDigits: 0,
-  }).format(amount);
+  }).format(naira);
 }
 
-export function formatNairaShort(amount: number): string {
-  if (amount >= 1000000) return `₦${(amount / 1000000).toFixed(1)}M`;
-  if (amount >= 1000) return `₦${(amount / 1000).toFixed(1)}K`;
-  return `₦${amount.toFixed(0)}`;
+/** Format kobo as short Naira string (e.g., ₦1.5K, ₦2.3M) */
+export function formatNairaShort(amountInKobo: number): string {
+  const naira = koboToNaira(amountInKobo);
+  if (naira >= 1000000) return `₦${(naira / 1000000).toFixed(1)}M`;
+  if (naira >= 1000) return `₦${(naira / 1000).toFixed(1)}K`;
+  return `₦${naira.toFixed(0)}`;
 }
 
 export function daysUntil(dateString: string): number {
@@ -50,14 +64,14 @@ export function generateId(): string {
 }
 
 export function calculateSafeToSpend(
-  totalBalance: number,
-  totalObligations: number,
-  totalPlannedSavings: number,
+  totalBalanceInKobo: number,
+  totalObligationsInKobo: number,
+  totalPlannedSavingsInKobo: number,
   daysUntilNextIncome: number
-): { unallocated: number; dailyLimit: number } {
-  const unallocated = Math.max(0, totalBalance - totalObligations - totalPlannedSavings);
-  const dailyLimit = daysUntilNextIncome > 0 ? unallocated / daysUntilNextIncome : unallocated;
-  return { unallocated, dailyLimit };
+): { unallocatedInKobo: number; dailyLimitInKobo: number } {
+  const unallocatedInKobo = Math.max(0, totalBalanceInKobo - totalObligationsInKobo - totalPlannedSavingsInKobo);
+  const dailyLimitInKobo = daysUntilNextIncome > 0 ? Math.floor(unallocatedInKobo / daysUntilNextIncome) : unallocatedInKobo;
+  return { unallocatedInKobo, dailyLimitInKobo };
 }
 
 export function getCategoryIcon(categoryId: string): string {

@@ -28,17 +28,17 @@ router.get('/summary', (req: Request, res: Response) => {
 
 router.post('/', (req: Request, res: Response) => {
   const userId = (req as any).userId;
-  const { type, amount, category, description, date, merchant, paymentMethod, budgetBucket, notes, source } = req.body;
+  const { type, amountInKobo, category, description, date, merchant, paymentMethod, budgetBucket, notes, source } = req.body;
 
-  if (!type || !amount || !category) {
-    return res.status(400).json({ error: 'Type, amount, and category are required' });
+  if (!type || amountInKobo == null || !category) {
+    return res.status(400).json({ error: 'Type, amountInKobo, and category are required' });
   }
 
   const transaction = db.transactions.create({
     id: generateId(),
     userId,
     type,
-    amount: Number(amount),
+    amountInKobo: Number(amountInKobo),
     category,
     description: description || '',
     date: date || new Date().toISOString(),
@@ -60,7 +60,7 @@ router.put('/:id', (req: Request, res: Response) => {
   const existing = db.transactions.findByUser(userId).find(t => t.id === id);
   if (!existing) return res.status(404).json({ error: 'Transaction not found' });
 
-  const allowed = ['type', 'amount', 'category', 'description', 'date', 'merchant', 'paymentMethod', 'budgetBucket', 'notes', 'source'];
+  const allowed = ['type', 'amountInKobo', 'category', 'description', 'date', 'merchant', 'paymentMethod', 'budgetBucket', 'notes', 'source'];
   const updates: Record<string, any> = {};
   allowed.forEach(field => {
     if (req.body[field] !== undefined) updates[field] = req.body[field];

@@ -2,105 +2,174 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { BookOpen, CheckCircle, Clock, ChevronRight, ArrowLeft } from 'lucide-react';
 import Header from '../components/Header';
-
-const LESSONS = [
-  { id: '1', title: 'Budgeting 101', description: 'Build a budget that survives real student life', category: 'budgeting', duration: 5, content: 'A budget is simply a plan for your money. Start by tracking where it actually goes for one week. Then split your income into four buckets: Obligations (rent, fees, family support), Essentials (food, transport, data), Future You (savings and emergency fund), and Enjoyment (socialising, eating out).\n\nThe key is honesty. Budget for what you actually spend, not what you wish you spent. Once the plan exists, check it weekly and adjust when life changes — that is exactly what Moneva does for you.' },
-  { id: '2', title: 'Needs vs wants', description: 'Decide in the moment without guilt', category: 'saving', duration: 3, content: 'A need is what you must have to function: food, transport to campus, data for assignments. A want is nice to have: eating out, new shoes, the latest drop.\n\nThe goal is not to kill every want — that plan fails by week two. Cover needs first, then spend deliberately on wants using unallocated money. Try the 24-hour rule: wait a day before any non-essential purchase above ₦5,000. Often the urge passes, and when it does not, you can afford it knowingly rather than impulsively.' },
-  { id: '3', title: 'The power of small savings', description: 'How ₦500 a week becomes a real buffer', category: 'saving', duration: 4, content: 'Saving ₦500 a week is ₦2,000 a month and ₦24,000 a year — enough for textbooks, a laptop repair, or a month of emergencies.\n\nConsistency beats size. Move the money on the day your allowance arrives, before you can spend it. What you do not see, you do not spend. When a month is tight, save something anyway — even ₦100 keeps the habit and the streak alive.' },
-  { id: '4', title: 'Understanding interest', description: 'How it works for you and against you', category: 'general', duration: 6, content: 'Interest is the price of using money. Borrow and you pay it; save and you may earn it.\n\nThe important idea is compounding: your earnings start earning too. Starting early matters more than starting big. On the borrowing side, short-term loan apps can charge extreme effective rates — a ₦10,000 loan that costs ₦2,000 for thirty days is over 20% a month. Avoid borrowing for consumption, and never take a new loan to repay an old one.' },
-  { id: '5', title: 'Avoiding financial traps', description: 'Five mistakes that empty student accounts', category: 'general', duration: 5, content: '1. "I will pay you back tomorrow" lending. Set a fixed amount you are willing to support others with, and stop there.\n\n2. Lifestyle creep. Spending rises the moment your allowance does, so you never feel richer.\n\n3. Ignoring small costs. ₦200 here and ₦300 there is often your biggest category by month end.\n\n4. Not tracking. If you cannot see where money goes, you cannot change it.\n\n5. Emotional spending. Boredom and stress purchases feel good for minutes and cost for weeks. Notice the trigger, delay the decision.' },
-  { id: '6', title: 'Building an emergency fund', description: 'The buffer that keeps your plan standing', category: 'saving', duration: 4, content: 'An emergency fund is money held for the unexpected: a broken phone, medical costs, a family need, a sudden transport fare.\n\nAim for one to three months of essential expenses. Start small — ₦5,000 already covers most minor emergencies. Keep it separate from spending money so it is not quietly absorbed, use it only for genuine emergencies, and top it back up after any withdrawal. In Moneva it lives as its own goal, protected inside your Safe to Spend calculation.' },
-];
+import { useStore } from '../context/store';
+import { LITERACY_ARTICLES, type LiteracyBlock } from '../data/literacyArticles';
 
 const categoryColors: Record<string, string> = {
   budgeting: 'bg-primary-50 text-primary-700',
   saving: 'bg-emerald-50 text-emerald-700',
-  general: 'bg-amber-50 text-amber-700',
+  spending: 'bg-amber-50 text-amber-700',
+  safety: 'bg-red-50 text-red-700',
+  general: 'bg-surface-100 text-navy-700',
 };
+
+function Block({ block }: { block: LiteracyBlock }) {
+  if (block.type === 'h') {
+    return <h2 className="text-base font-bold text-navy-900 pt-3 pb-1 lg:text-lg">{block.text}</h2>;
+  }
+  if (block.type === 'strong') {
+    return (
+      <p className="text-sm font-semibold text-navy-900 leading-relaxed border-l-2 border-primary-400 pl-3 lg:text-base">
+        {block.text}
+      </p>
+    );
+  }
+  if (block.type === 'list') {
+    return (
+      <ul className="space-y-1.5 pl-1">
+        {block.items.map((item, i) => (
+          <li key={i} className="text-sm text-navy-800 leading-relaxed flex items-start gap-2 lg:text-base">
+            <span className="w-1.5 h-1.5 rounded-full bg-primary-400 shrink-0 mt-2" />
+            <span>{item}</span>
+          </li>
+        ))}
+      </ul>
+    );
+  }
+  if (block.type === 'table') {
+    const [head, ...rows] = block.rows;
+    return (
+      <div className="overflow-x-auto rounded-xl border border-surface-100">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="bg-surface-50">
+              {head.map((cell, i) => (
+                <th key={i} className="text-left px-3 py-2 font-semibold text-navy-900 whitespace-nowrap">{cell}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, r) => {
+              const isTotal = row[0]?.trim().toLowerCase() === 'total';
+              return (
+                <tr key={r} className={`${isTotal ? 'bg-primary-50/60' : 'border-t border-surface-100'}`}>
+                  {row.map((cell, c) => (
+                    <td key={c} className={`px-3 py-2 text-navy-800 ${isTotal ? 'font-bold' : ''} ${c > 0 ? 'tabular-nums' : ''}`}>
+                      {cell}
+                    </td>
+                  ))}
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    );
+  }
+  return <p className="text-sm text-navy-800 leading-relaxed lg:text-base">{block.text}</p>;
+}
 
 export default function LiteracyPage() {
   const navigate = useNavigate();
   const [selected, setSelected] = useState<string | null>(null);
-  const [completed, setCompleted] = useState<string[]>([]);
+  const { literacyCompleted, toggleLiteracyCompleted } = useStore();
 
-  const lesson = LESSONS.find(l => l.id === selected);
+  const article = LITERACY_ARTICLES.find(a => a.id === selected);
 
-  if (lesson) {
+  if (article) {
+    const index = LITERACY_ARTICLES.findIndex(a => a.id === article.id);
+    const next = LITERACY_ARTICLES[index + 1];
+
     return (
       <>
         <div className="sticky top-0 z-40 bg-surface-50/90 backdrop-blur-md border-b border-surface-100">
-          <div className="flex items-center gap-2.5 px-5 h-14">
-            <button onClick={() => setSelected(null)} className="w-9 h-9 flex items-center justify-center hover:bg-surface-100 rounded-xl">
+          <div className="flex items-center gap-2.5 px-5 h-14 lg:px-8">
+            <button onClick={() => setSelected(null)} className="w-9 h-9 flex items-center justify-center hover:bg-surface-100 rounded-xl cursor-pointer">
               <ArrowLeft size={19} className="text-navy-800" />
             </button>
-            <span className="font-bold text-navy-900 truncate">{lesson.title}</span>
-            <span className="ml-auto flex items-center gap-1 text-[11px] text-surface-400">
-              <Clock size={12} /> {lesson.duration} min
+            <span className="font-bold text-navy-900 truncate">{article.title}</span>
+            <span className="ml-auto flex items-center gap-1 text-[11px] text-surface-500 shrink-0">
+              <Clock size={12} /> {article.duration} min
             </span>
           </div>
         </div>
 
-        <div className="px-5 py-5 pb-8 space-y-4">
-          <div className="card p-5">
-            <span className={`badge mb-4 ${categoryColors[lesson.category]}`}>{lesson.category}</span>
-            <p className="text-sm text-navy-800 leading-relaxed whitespace-pre-line">{lesson.content}</p>
+        <div className="px-5 py-5 pb-8 space-y-4 lg:px-10 lg:max-w-3xl">
+          <div className="card p-5 lg:p-7 space-y-3">
+            <span className={`badge inline-block ${categoryColors[article.category]}`}>{article.category}</span>
+            <h1 className="text-xl font-bold text-navy-900 lg:text-2xl">{article.title}</h1>
+            <p className="text-sm text-surface-600 lg:text-base">{article.description}</p>
+            {article.blocks.map((b, i) => <Block key={i} block={b} />)}
           </div>
 
           <button
-            onClick={() => { setCompleted(c => c.includes(lesson.id) ? c : [...c, lesson.id]); setSelected(null); }}
-            className={`w-full py-3.5 rounded-xl font-semibold text-sm flex items-center justify-center gap-2 ${
-              completed.includes(lesson.id) ? 'bg-emerald-50 text-emerald-700' : 'btn-primary'
+            onClick={() => { toggleLiteracyCompleted(article.id); setSelected(null); }}
+            className={`w-full py-3.5 rounded-xl font-semibold text-sm flex items-center justify-center gap-2 cursor-pointer ${
+              literacyCompleted.includes(article.id) ? 'bg-emerald-50 text-emerald-700' : 'btn-primary'
             }`}
           >
-            {completed.includes(lesson.id) ? (<><CheckCircle size={16} /> Completed</>) : 'Mark as complete'}
+            {literacyCompleted.includes(article.id) ? (<><CheckCircle size={16} /> Completed</>) : 'Mark as complete'}
           </button>
 
           <button onClick={() => navigate('/coach')} className="w-full btn-secondary text-sm py-3">
             Ask the coach about this
           </button>
+
+          {next && (
+            <button
+              onClick={() => { setSelected(next.id); window.scrollTo(0, 0); }}
+              className="card p-4 w-full text-left flex items-center gap-3 hover:bg-surface-50 transition-colors cursor-pointer"
+            >
+              <div className="flex-1 min-w-0">
+                <p className="text-[10px] uppercase tracking-wider text-surface-500 mb-0.5">Up next</p>
+                <h3 className="font-semibold text-sm text-navy-900 truncate">{next.title}</h3>
+              </div>
+              <ChevronRight size={16} className="text-surface-300 shrink-0" />
+            </button>
+          )}
         </div>
       </>
     );
   }
 
-  const pct = Math.round((completed.length / LESSONS.length) * 100);
+  const pct = Math.round((literacyCompleted.length / LITERACY_ARTICLES.length) * 100);
 
   return (
     <>
       <Header title="Literacy Hub" showBack />
 
-      <div className="px-5 py-4 space-y-4 pb-8">
+      <div className="px-5 py-4 space-y-4 pb-8 lg:px-10">
         <div className="card p-4 bg-navy-800 border-navy-800">
           <div className="flex items-center justify-between mb-2">
             <span className="text-[11px] font-medium text-primary-200">Your progress</span>
-            <span className="text-[11px] font-bold text-white">{completed.length}/{LESSONS.length}</span>
+            <span className="text-[11px] font-bold text-white">{literacyCompleted.length}/{LITERACY_ARTICLES.length}</span>
           </div>
           <div className="h-2 bg-white/15 rounded-full overflow-hidden mb-2">
             <div className="h-full bg-primary-400 rounded-full transition-all duration-500" style={{ width: `${pct}%` }} />
           </div>
-          <p className="text-xs text-primary-200">Short lessons tied to what you are actually doing with your money.</p>
+          <p className="text-xs text-primary-200">Full guides tied to what you are actually doing with your money.</p>
         </div>
 
-        <div className="space-y-2.5">
-          {LESSONS.map(l => (
+        <div className="space-y-2.5 lg:grid lg:grid-cols-2 lg:gap-3 lg:space-y-0 lg:content-start">
+          {LITERACY_ARTICLES.map(a => (
             <button
-              key={l.id}
-              onClick={() => setSelected(l.id)}
-              className="card p-4 flex items-center gap-3 w-full text-left hover:bg-surface-50 transition-colors"
+              key={a.id}
+              onClick={() => { setSelected(a.id); window.scrollTo(0, 0); }}
+              className="card p-4 flex items-center gap-3 w-full text-left hover:bg-surface-50 transition-colors cursor-pointer"
             >
-              <div className={`icon-tile ${completed.includes(l.id) ? 'bg-emerald-50' : 'bg-primary-50'}`}>
-                {completed.includes(l.id)
-                  ? <CheckCircle size={18} className="text-emerald-600" />
+              <div className={`icon-tile ${literacyCompleted.includes(a.id) ? 'bg-emerald-50' : 'bg-primary-50'}`}>
+                {literacyCompleted.includes(a.id)
+                  ? <CheckCircle size={18} className="text-emerald-700" />
                   : <BookOpen size={18} className="text-primary-600" />}
               </div>
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2 mb-0.5">
-                  <h3 className="font-semibold text-sm text-navy-900">{l.title}</h3>
-                  <span className={`badge text-[10px] ${categoryColors[l.category]}`}>{l.category}</span>
+                  <h3 className="font-semibold text-sm text-navy-900">{a.title}</h3>
+                  <span className={`badge text-[10px] shrink-0 ${categoryColors[a.category]}`}>{a.category}</span>
                 </div>
                 <div className="flex items-center gap-2">
-                  <p className="text-xs text-surface-400 truncate">{l.description}</p>
-                  <span className="text-[10px] text-surface-300 shrink-0">{l.duration} min</span>
+                  <p className="text-xs text-surface-500 truncate">{a.description}</p>
+                  <span className="text-[10px] text-surface-300 shrink-0">{a.duration} min</span>
                 </div>
               </div>
               <ChevronRight size={16} className="text-surface-300 shrink-0" />

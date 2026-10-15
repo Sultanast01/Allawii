@@ -4,7 +4,7 @@ import { fileURLToPath } from 'url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const dataDir = join(__dirname, '..', '..', 'data');
-const dbPath = join(dataDir, 'moneva.json');
+const dbPath = join(dataDir, 'allowii.json');
 
 if (!existsSync(dataDir)) mkdirSync(dataDir, { recursive: true });
 
@@ -14,15 +14,102 @@ interface Database {
   savingsGoals: any[];
   obligations: any[];
   bmoniAccounts: any[];
+  roundUpSettings: any[];
+  roundUpLedger: any[];
 }
 
 function loadDb(): Database {
   if (existsSync(dbPath)) {
-    return JSON.parse(readFileSync(dbPath, 'utf-8'));
+    const data = JSON.parse(readFileSync(dbPath, 'utf-8'));
+    // Ensure new arrays exist for backwards compatibility
+    if (!data.roundUpSettings) data.roundUpSettings = [];
+    if (!data.roundUpLedger) data.roundUpLedger = [];
+    // Migrate from naira to kobo if old field names are present
+    if (needsKoboMigration(data)) {
+      migrateToKobo(data);
+      saveDb(data);
+    }
+    return data;
   }
-  const empty: Database = { users: [], transactions: [], savingsGoals: [], obligations: [], bmoniAccounts: [] };
+  const empty: Database = { users: [], transactions: [], savingsGoals: [], obligations: [], bmoniAccounts: [], roundUpSettings: [], roundUpLedger: [] };
   writeFileSync(dbPath, JSON.stringify(empty, null, 2));
   return empty;
+}
+
+function needsKoboMigration(data: any): boolean {
+  return data.users?.some((u: any) => u.typicalIncome !== undefined && u.typicalIncomeInKobo === undefined) ||
+         data.transactions?.some((t: any) => t.amount !== undefined && t.amountInKobo === undefined);
+}
+
+function migrateToKobo(data: any): void {
+  if (data.users) {
+    data.users.forEach((u: any) => {
+      if (u.typicalIncome !== undefined && u.typicalIncomeInKobo === undefined) {
+        u.typicalIncomeInKobo = Math.round(u.typicalIncome * 100);
+        delete u.typicalIncome;
+      }
+    });
+  }
+  if (data.transactions) {
+    data.transactions.forEach((t: any) => {
+      if (t.amount !== undefined && t.amountInKobo === undefined) {
+        t.amountInKobo = Math.round(t.amount * 100);
+        delete t.amount;
+      }
+    });
+  }
+  if (data.savingsGoals) {
+    data.savingsGoals.forEach((g: any) => {
+      if (g.targetAmount !== undefined && g.targetAmountInKobo === undefined) {
+        g.targetAmountInKobo = Math.round(g.targetAmount * 100);
+        delete g.targetAmount;
+      }
+      if (g.currentAmount !== undefined && g.currentAmountInKobo === undefined) {
+        g.currentAmountInKobo = Math.round(g.currentAmount * 100);
+        delete g.currentAmount;
+      }
+      if (g.contributionPerCycle !== undefined && g.contributionPerCycleInKobo === undefined) {
+        g.contributionPerCycleInKobo = Math.round(g.contributionPerCycle * 100);
+        delete g.contributionPerCycle;
+      }
+    });
+  }
+  if (data.obligations) {
+    data.obligations.forEach((o: any) => {
+      if (o.amount !== undefined && o.amountInKobo === undefined) {
+        o.amountInKobo = Math.round(o.amount * 100);
+        delete o.amount;
+      }
+    });
+  }
+  if (data.roundUpSettings) {
+    data.roundUpSettings.forEach((s: any) => {
+      if (s.roundUpTo !== undefined && s.roundUpToInKobo === undefined) {
+        s.roundUpToInKobo = Math.round(s.roundUpTo * 100);
+        delete s.roundUpTo;
+      }
+      if (s.threshold !== undefined && s.thresholdInKobo === undefined) {
+        s.thresholdInKobo = Math.round(s.threshold * 100);
+        delete s.threshold;
+      }
+    });
+  }
+  if (data.roundUpLedger) {
+    data.roundUpLedger.forEach((e: any) => {
+      if (e.spareChange !== undefined && e.spareChangeInKobo === undefined) {
+        e.spareChangeInKobo = Math.round(e.spareChange * 100);
+        delete e.spareChange;
+      }
+      if (e.originalAmount !== undefined && e.originalAmountInKobo === undefined) {
+        e.originalAmountInKobo = Math.round(e.originalAmount * 100);
+        delete e.originalAmount;
+      }
+      if (e.roundedUp !== undefined && e.roundedUpInKobo === undefined) {
+        e.roundedUpInKobo = Math.round(e.roundedUp * 100);
+        delete e.roundedUp;
+      }
+    });
+  }
 }
 
 function saveDb(data: Database) {
@@ -79,15 +166,15 @@ const db = {
     },
     summary: (userId: string) => {
       const txs = loadDb().transactions.filter(t => t.userId === userId);
-      const income = txs.filter(t => t.type === 'income').reduce((s, t) => s + t.amount, 0);
-      const expenses = txs.filter(t => t.type === 'expense').reduce((s, t) => s + t.amount, 0);
+      const income = txs.filter(t => t.type === 'income').reduce((s, t) => s + (t.amountInKobo || 0), 0);
+      const expenses = txs.filter(t => t.type === 'expense').reduce((s, t) => s + (t.amountInKobo || 0), 0);
       const byBucket: Record<string, number> = {};
       const byCategory: Record<string, number> = {};
       txs.filter(t => t.type === 'expense').forEach(t => {
-        byBucket[t.budgetBucket] = (byBucket[t.budgetBucket] || 0) + t.amount;
-        byCategory[t.category] = (byCategory[t.category] || 0) + t.amount;
+        byBucket[t.budgetBucket] = (byBucket[t.budgetBucket] || 0) + (t.amountInKobo || 0);
+        byCategory[t.category] = (byCategory[t.category] || 0) + (t.amountInKobo || 0);
       });
-      return { totalIncome: income, totalExpenses: expenses, balance: income - expenses, byBucket, byCategory };
+      return { totalIncomeInKobo: income, totalExpensesInKobo: expenses, balanceInKobo: income - expenses, byBucket, byCategory };
     },
   },
 
@@ -98,6 +185,47 @@ const db = {
       data.bmoniAccounts.push(account);
       saveDb(data);
       return account;
+    },
+  },
+
+  roundUpSettings: {
+    findByUser: (userId: string) => loadDb().roundUpSettings.find(s => s.userId === userId),
+    upsert: (userId: string, settings: any) => {
+      const data = loadDb();
+      const idx = data.roundUpSettings.findIndex(s => s.userId === userId);
+      if (idx >= 0) {
+        data.roundUpSettings[idx] = { ...data.roundUpSettings[idx], ...settings };
+        saveDb(data);
+        return data.roundUpSettings[idx];
+      }
+      const newSettings = { userId, ...settings };
+      data.roundUpSettings.push(newSettings);
+      saveDb(data);
+      return newSettings;
+    },
+  },
+
+  roundUpLedger: {
+    findByUser: (userId: string) => {
+      const entries = loadDb().roundUpLedger.filter(e => e.userId === userId);
+      entries.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      return entries;
+    },
+    create: (entry: any) => {
+      const data = loadDb();
+      data.roundUpLedger.push(entry);
+      saveDb(data);
+      return entry;
+    },
+    update: (id: string, userId: string, updates: any) => {
+      const data = loadDb();
+      const idx = data.roundUpLedger.findIndex(e => e.id === id && e.userId === userId);
+      if (idx >= 0) {
+        data.roundUpLedger[idx] = { ...data.roundUpLedger[idx], ...updates };
+        saveDb(data);
+        return data.roundUpLedger[idx];
+      }
+      return null;
     },
   },
 };
