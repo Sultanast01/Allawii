@@ -178,6 +178,34 @@ const db = {
     },
   },
 
+  savingsGoals: {
+    findByUser: (userId: string) => loadDb().savingsGoals.filter(goal => goal.userId === userId),
+    findById: (id: string, userId: string) => loadDb().savingsGoals.find(goal => goal.id === id && goal.userId === userId),
+    create: (goal: any) => {
+      const data = loadDb();
+      data.savingsGoals.push(goal);
+      saveDb(data);
+      return goal;
+    },
+    update: (id: string, userId: string, updates: any) => {
+      const data = loadDb();
+      const idx = data.savingsGoals.findIndex(goal => goal.id === id && goal.userId === userId);
+      if (idx >= 0) { data.savingsGoals[idx] = { ...data.savingsGoals[idx], ...updates }; saveDb(data); return data.savingsGoals[idx]; }
+      return null;
+    },
+    delete: (id: string, userId: string) => {
+      const data = loadDb();
+      data.savingsGoals = data.savingsGoals.filter(goal => !(goal.id === id && goal.userId === userId));
+      saveDb(data);
+    },
+    replaceForUser: (userId: string, goals: any[]) => {
+      const data = loadDb();
+      data.savingsGoals = data.savingsGoals.filter(goal => goal.userId !== userId).concat(goals);
+      saveDb(data);
+      return goals;
+    },
+  },
+
   bmoniAccounts: {
     findByUser: (userId: string) => loadDb().bmoniAccounts.find(a => a.userId === userId),
     create: (account: any) => {

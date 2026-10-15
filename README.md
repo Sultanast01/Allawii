@@ -32,6 +32,7 @@ The app is usable with the server switched off — only the B Moni screens need 
 | Round-Up Savings | Real accrual engine on local transactions; sweep requires deployed smart wallet (see below) |
 | Student offers | Illustrative, with a stated disclaimer |
 | AI Money Coach | Deterministic engine on local data. No external AI provider, so no personal finance data leaves the device |
+| WhatsApp assistant | Real — signed webhook, phone-to-account linking, and the same ledger the app syncs. Insights are deterministic (no LLM); replies are only *delivered* once Meta credentials are in `server/.env`, otherwise they print to the server console |
 
 ## Features
 
@@ -58,7 +59,7 @@ The app is usable with the server switched off — only the B Moni screens need 
 - Scam safety check — flags on a pasted message, in plain language, with the rule list shown on screen
 - Financial calendar — income, dues, deadlines and goal checks on one timeline
 - Campus group contributions ledger (simulated, labelled)
-- WhatsApp assistant preferences
+- WhatsApp assistant — text your own number from WhatsApp to check balance, record money in or out, see goals and get insights
 
 **Streaks**
 
@@ -129,6 +130,34 @@ Browsers cannot use the `bmoni_embedded_sdk` (it needs iOS Secure Enclave / Andr
 
 The signature is always produced by the user's own browser wallet — the backend never fabricates a key or signs on the user's behalf.
 
+## WhatsApp Assistant
+
+A WhatsApp Business Cloud API bot over the same ledger the app uses. Nothing about the money lives in the bot: it reads and writes the server ledger, and the browser tab syncs with it.
+
+| Piece | File | Role |
+| --- | --- | --- |
+| Intent + replies | `server/src/services/whatsapp.ts` | pure — classify text, build balance/goals/insights/help replies, resolve the linked account |
+| Transport | `server/src/services/whatsapp.cloud.ts` | signature check, payload extraction, id de-dupe, Graph API send, 4096-char clamp |
+| Routes | `server/src/routes/whatsapp.ts` | `GET /api/whatsapp/webhook` (Meta handshake), `POST` (signed inbound), `GET /api/whatsapp/status` |
+| Ledger sync | `server/src/routes/sync.ts` + `client/src/services/sync.ts` | last-write-wins merge, tombstones, server-only rows never destroyed |
+
+Commands (natural phrasing works too — "how much do i have", "i bought data for 850"):
+
+- `balance` · `spend 850 for data` · `received 60000 allowance` · `goals` · `insights` · `undo` · `help`
+- An amount with no recognisable category returns a numbered category menu; `cancel` aborts it.
+
+### Turning it on
+
+1. Create a WhatsApp Business Cloud API app in the Meta developer console and keep the sandbox number.
+2. Set the webhook callback URL to `https://<your-public-host>/api/whatsapp/webhook` and the verify token to the same value as `WHATSAPP_VERIFY_TOKEN`. Meta needs HTTPS, so a local port needs a tunnel (`ngrok http 3001`).
+3. Subscribe to the `messages` field.
+4. Put the app secret, access token and phone-number id in `server/.env` (see `server/.env.example`) and restart the API. The startup line reads `WhatsApp webhook: signature checks on · outbound: Graph API`.
+5. On the site, save the same WhatsApp number in **Profile → WhatsApp assistant**. `GET /api/whatsapp/status` reports what is still missing, and the card says *Live* when the number, webhook and send credentials all line up.
+
+Without `WHATSAPP_TOKEN` the bot still answers — replies print to the server console instead of being delivered, so the whole flow is testable before any Meta credentials exist. Without `WHATSAPP_APP_SECRET` the webhook returns 503 rather than accepting unsigned traffic.
+
+**Identity rule:** the inbound `wa_id` is normalised to E.164 and matched against `users.phoneNumber`. Two accounts on one number gets no reply at all, because any answer could leak the wrong ledger; an unknown number gets a "not linked yet" message that names nothing about the account.
+
 ## Auth & Onboarding
 
 | Screen | Path | What it does |
@@ -180,6 +209,13 @@ BMONI_BASE_URL=https://embedded-dev.bmoni.com
 BMONI_API_KEY=<sandbox key only — never a production key, never in the client>
 JWT_SECRET=<random secret>
 PORT=3001
+
+# WhatsApp Business Cloud API — optional, see "WhatsApp Assistant"
+WHATSAPP_APP_SECRET=<the app's App Secret; webhook returns 503 without it>
+WHATSAPP_VERIFY_TOKEN=<the same string you type into Meta's console>
+WHATSAPP_TOKEN=<temporary or permanent access token>
+WHATSAPP_PHONE_NUMBER_ID=<the sandbox number id>
+WHATSAPP_GRAPH_VERSION=v23.0
 ```
 
 `server/.env` is git-ignored. Production credentials are not supported by this build.

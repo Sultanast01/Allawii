@@ -4,6 +4,7 @@ import type { User, Transaction, SavingsGoal, Obligation, SpendingInsight, Savin
 import { DEFAULT_CATEGORIES } from '../types';
 import { generateId, daysUntil } from '../utils';
 import { apiPut, clearSession, login as apiLogin, register as apiRegister } from '../services/api';
+import { mergeLedger, pullLedger, pushLedger } from '../services/sync';
 
 export interface SuggestedAdjustment {
   id: string;
@@ -40,14 +41,6 @@ export interface Group {
   deadline: string;
 }
 
-export interface WhatsAppSettings {
-  enabled: boolean;
-  budgetReminders: boolean;
-  savingsUpdates: boolean;
-  weeklyDigest: boolean;
-  lowBalanceAlerts: boolean;
-}
-
 export interface SessionProfile {
   id: string;
   name: string;
@@ -72,14 +65,19 @@ interface AppState {
   planUpdate: PlanUpdate | null;
   calendarEvents: CalendarEvent[];
   groups: Group[];
-  whatsapp: WhatsAppSettings;
   textScale: 'normal' | 'large';
   inflationRate: number;
   literacyCompleted: string[];
   authPending: boolean;
   authError: string | null;
   profileSyncError: string | null;
+  deletedTransactionIds: string[];
+  deletedGoalIds: string[];
+  syncState: 'idle' | 'syncing' | 'error';
+  syncError: string | null;
+  lastSyncedAt: string | null;
 
+  syncNow: () => Promise<void>;
   setUser: (user: User) => void;
   logout: () => void;
   login: (email: string, password: string, remember: boolean) => Promise<boolean>;
@@ -103,7 +101,6 @@ interface AppState {
   toggleCalendarEvent: (id: string) => void;
   addGroup: (g: Omit<Group, 'id'>) => void;
   contributeToGroup: (groupId: string, memberName: string, amountInKobo: number) => void;
-  setWhatsapp: (updates: Partial<WhatsAppSettings>) => void;
   getSafeToSpend: () => SafeToSpend;
   getTotalBalance: () => number;
   getMonthlyAllowance: () => number;
@@ -114,10 +111,6 @@ interface AppState {
   markInsightRead: (id: string) => void;
   resetAll: () => void;
 }
-
-const DEFAULT_WHATSAPP: WhatsAppSettings = {
-  enabled: false, budgetReminders: true, savingsUpdates: true, weeklyDigest: false, lowBalanceAlerts: true,
-};
 
 export const DEFAULT_INFLATION = 15;
 
@@ -428,6 +421,17 @@ const buildDemo = () => {
   return { transactions, savingsGoals, categoryBudgets, calendarEvents, groups, planUpdate, insights, nextIncome, contributionDates };
 };
 
+let ledgerSyncInFlight = false;
+let lastSyncedSignature = '';
+
+// Identity + last-edit time only: a new array reference that carries the same rows must not
+// look like an edit and send the whole ledger back to the server.
+function ledgerSignature(state: AppState): string {
+  const tx = state.transactions.map(t => `${t.id}@${t.updatedAt || t.date || ''}`).join('|');
+  const goals = state.savingsGoals.map(g => `${g.id}@${g.updatedAt || g.createdAt || ''}`).join('|');
+  return `${tx}#${goals}#${state.deletedTransactionIds.length}:${state.deletedGoalIds.length}`;
+}
+
 export const useStore = create<AppState>()(
   persist(
     (set, get) => ({
@@ -443,13 +447,17 @@ export const useStore = create<AppState>()(
       planUpdate: null,
       calendarEvents: [],
       groups: [],
-      whatsapp: { ...DEFAULT_WHATSAPP },
       textScale: 'normal',
       inflationRate: DEFAULT_INFLATION,
       literacyCompleted: [],
       authPending: false,
       authError: null,
       profileSyncError: null,
+      deletedTransactionIds: [],
+      deletedGoalIds: [],
+      syncState: 'idle',
+      syncError: null,
+      lastSyncedAt: null,
 
       setUser: (user) => set({ user, isAuthenticated: true }),
       logout: () => { clearSession(); set({ user: null, isAuthenticated: false, isDemoMode: false }); },
@@ -500,6 +508,42 @@ export const useStore = create<AppState>()(
       })),
 
       setAuthError: (authError) => set({ authError }),
+
+      syncNow: async () => {
+        if (ledgerSyncInFlight || !get().isAuthenticated) return;
+        ledgerSyncInFlight = true;
+        set({ syncState: 'syncing' });
+        const before = get();
+        try {
+          const remote = await pullLedger();
+          const mergedTx = mergeLedger(before.transactions, remote.transactions, before.deletedTransactionIds);
+          const mergedGoals = mergeLedger(before.savingsGoals, remote.savingsGoals, before.deletedGoalIds);
+          const pushed = await pushLedger({
+            transactions: mergedTx.rows,
+            savingsGoals: mergedGoals.rows,
+            deletedTransactionIds: before.deletedTransactionIds,
+            deletedGoalIds: before.deletedGoalIds,
+          });
+          // Merge the server's answer back into whatever the user typed while the request was in flight.
+          const live = get();
+          const adoptedTx = mergeLedger(live.transactions, pushed.transactions, []);
+          const adoptedGoals = mergeLedger(live.savingsGoals, pushed.savingsGoals, []);
+          set({
+            transactions: adoptedTx.rows,
+            savingsGoals: adoptedGoals.rows,
+            deletedTransactionIds: live.deletedTransactionIds.filter(id => !pushed.transactions.some(t => t.id === id)),
+            deletedGoalIds: live.deletedGoalIds.filter(id => !pushed.savingsGoals.some(g => g.id === id)),
+            syncState: 'idle',
+            syncError: null,
+            lastSyncedAt: pushed.syncedAt,
+          });
+          lastSyncedSignature = ledgerSignature(get());
+        } catch (error) {
+          set({ syncState: 'error', syncError: (error as Error).message });
+        } finally {
+          ledgerSyncInFlight = false;
+        }
+      },
 
       completeSetup: async (plan) => {
         const built = buildStarterPlan(plan);
@@ -557,23 +601,35 @@ export const useStore = create<AppState>()(
       },
 
       addTransaction: (tx) => set((state) => {
-        const newTx: Transaction = { ...tx, id: generateId(), syncStatus: 'pending' } as Transaction;
+        const newTx: Transaction = {
+          ...tx, id: generateId(), syncStatus: 'pending', updatedAt: new Date().toISOString(),
+        } as Transaction;
         const transactions = [newTx, ...state.transactions];
         const planUpdate = buildPlanUpdate({ ...state, transactions }, newTx);
         return planUpdate ? { transactions, planUpdate } : { transactions };
       }),
 
-      deleteTransaction: (id) => set((state) => ({ transactions: state.transactions.filter(t => t.id !== id) })),
+      deleteTransaction: (id) => set((state) => ({
+        transactions: state.transactions.filter(t => t.id !== id),
+        deletedTransactionIds: state.deletedTransactionIds.includes(id)
+          ? state.deletedTransactionIds
+          : [...state.deletedTransactionIds, id],
+      })),
 
       addSavingsGoal: (goal) => set((state) => ({
-        savingsGoals: [...state.savingsGoals, { ...goal, id: generateId(), progress: 0, createdAt: new Date().toISOString() }],
+        savingsGoals: [...state.savingsGoals, {
+          ...goal, id: generateId(), progress: 0, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+        }],
       })),
 
       updateSavingsGoal: (id, updates) => set((state) => ({
-        savingsGoals: state.savingsGoals.map(g => g.id === id ? { ...g, ...updates } : g),
+        savingsGoals: state.savingsGoals.map(g => g.id === id ? { ...g, ...updates, updatedAt: new Date().toISOString() } : g),
       })),
 
-      deleteSavingsGoal: (id) => set((state) => ({ savingsGoals: state.savingsGoals.filter(g => g.id !== id) })),
+      deleteSavingsGoal: (id) => set((state) => ({
+        savingsGoals: state.savingsGoals.filter(g => g.id !== id),
+        deletedGoalIds: state.deletedGoalIds.includes(id) ? state.deletedGoalIds : [...state.deletedGoalIds, id],
+      })),
 
       addToSavingsGoal: (id, amountInKobo) => set((state) => {
         const today = dayKey(new Date());
@@ -583,7 +639,12 @@ export const useStore = create<AppState>()(
           savingsGoals: state.savingsGoals.map(g => {
             if (g.id !== id) return g;
             const newAmount = g.currentAmountInKobo + amountInKobo;
-            return { ...g, currentAmountInKobo: newAmount, progress: Math.min(100, (newAmount / g.targetAmountInKobo) * 100) };
+            return {
+              ...g,
+              currentAmountInKobo: newAmount,
+              progress: Math.min(100, (newAmount / g.targetAmountInKobo) * 100),
+              updatedAt: new Date().toISOString(),
+            };
           }),
           streak: {
             currentStreak: view.current,
@@ -631,8 +692,6 @@ export const useStore = create<AppState>()(
         }),
       })),
 
-      setWhatsapp: (updates) => set((state) => ({ whatsapp: { ...state.whatsapp, ...updates } })),
-
       getSafeToSpend: () => {
         const state = get();
         const allowance = state.getMonthlyAllowance();
@@ -679,11 +738,53 @@ export const useStore = create<AppState>()(
       resetAll: () => set({
         user: null, isAuthenticated: false, isDemoMode: false, transactions: [], savingsGoals: [],
         obligations: [], categoryBudgets: [], insights: [], planUpdate: null,
-        calendarEvents: [], groups: [], whatsapp: { ...DEFAULT_WHATSAPP },
+        calendarEvents: [], groups: [],
         inflationRate: DEFAULT_INFLATION, literacyCompleted: [],
+        deletedTransactionIds: [], deletedGoalIds: [], syncError: null, lastSyncedAt: null,
         streak: { currentStreak: 0, longestStreak: 0, contributionDates: [] },
       }),
     }),
     { name: 'allowii-storage-v3' }
   )
 );
+
+const SYNC_DEBOUNCE_MS = 1200;
+const SYNC_POLL_MS = 60000;
+
+let syncTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleLedgerSync() {
+  if (syncTimer) clearTimeout(syncTimer);
+  syncTimer = setTimeout(() => {
+    syncTimer = null;
+    void useStore.getState().syncNow();
+  }, SYNC_DEBOUNCE_MS);
+}
+
+useStore.subscribe((state, prev) => {
+  if (state.isAuthenticated !== prev.isAuthenticated) {
+    lastSyncedSignature = '';
+    if (state.isAuthenticated) void state.syncNow();
+    return;
+  }
+  if (!state.isAuthenticated) return;
+  if (ledgerSignature(state) !== lastSyncedSignature) scheduleLedgerSync();
+});
+
+// A transaction typed into the WhatsApp bot cannot wake this tab, so an idle tab pulls on a timer.
+setInterval(() => {
+  const state = useStore.getState();
+  if (!state.isAuthenticated || state.syncState === 'syncing') return;
+  if (typeof document !== 'undefined' && document.hidden) return;
+  if (ledgerSignature(state) !== lastSyncedSignature) return; // a local edit already owns the debounced path
+  void state.syncNow();
+}, SYNC_POLL_MS);
+
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) return;
+  void useStore.getState().syncNow();
+});
+
+// The persisted session rehydrates before this module subscribes, so a returning user needs one pull
+// to see anything the bot recorded while the tab was closed.
+if (useStore.getState().isAuthenticated) void useStore.getState().syncNow();

@@ -36,10 +36,11 @@ export interface Transaction {
   paymentMethod?: string;
   budgetBucket: 'obligations' | 'essentials' | 'future_you' | 'enjoyment';
   notes?: string;
-  source: 'manual' | 'csv' | 'receipt' | 'bmoni';
+  source: 'manual' | 'csv' | 'receipt' | 'bmoni' | 'whatsapp';
   syncStatus: 'synced' | 'pending' | 'failed';
   receiptUrl?: string;
   recurringId?: string;
+  updatedAt?: string;
 }
 
 export interface SavingsGoal {
@@ -54,6 +55,7 @@ export interface SavingsGoal {
   progress: number;
   isPaused: boolean;
   createdAt: string;
+  updatedAt?: string;
 }
 
 export interface Obligation {

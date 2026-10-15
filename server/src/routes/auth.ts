@@ -55,6 +55,12 @@ router.post('/register', async (req: Request, res: Response) => {
     if (existing) return res.status(409).json({ error: 'Email already registered' });
 
     const normalizedPhone = normalizePhone(phoneNumber);
+    if (String(phoneNumber || '').trim() && !normalizedPhone) {
+      return res.status(400).json({ error: 'Enter a valid phone number, e.g. 08012345678 or +2348012345678' });
+    }
+    if (normalizedPhone && db.load().users.some(u => u.phoneNumber === normalizedPhone)) {
+      return res.status(409).json({ error: 'That number is already linked to another Allawii account.' });
+    }
     const passwordHash = await bcrypt.hash(password, 10);
     const id = generateId();
     const user = { id, name, email, passwordHash, university: university || null, phoneNumber: normalizedPhone, incomeFrequency: 'monthly', typicalIncomeInKobo: 0, nextIncomeDate: null, createdAt: new Date().toISOString() };
@@ -165,9 +171,23 @@ router.get('/me', authMiddleware, (req: Request, res: Response) => {
 });
 
 router.put('/profile', authMiddleware, (req: Request, res: Response) => {
-  const { incomeFrequency, typicalIncomeInKobo, nextIncomeDate, university } = req.body;
-  db.users.update((req as any).userId, { incomeFrequency, typicalIncomeInKobo, nextIncomeDate, university });
-  res.json({ success: true });
+  const { incomeFrequency, typicalIncomeInKobo, nextIncomeDate, university, phoneNumber } = req.body;
+  const updates: Record<string, unknown> = { incomeFrequency, typicalIncomeInKobo, nextIncomeDate, university };
+  if (phoneNumber !== undefined) {
+    const normalized = normalizePhone(phoneNumber);
+    if (!normalized) {
+      res.status(400).json({ error: 'Enter a valid phone number, e.g. 08012345678 or +2348012345678' });
+      return;
+    }
+    const owner = db.load().users.find(u => u.phoneNumber === normalized && u.id !== (req as any).userId);
+    if (owner) {
+      res.status(409).json({ error: 'That number is already linked to another Allawii account.' });
+      return;
+    }
+    updates.phoneNumber = normalized;
+  }
+  db.users.update((req as any).userId, updates);
+  res.json({ success: true, phoneNumber: db.users.findById((req as any).userId)?.phoneNumber || null });
 });
 
 export default router;

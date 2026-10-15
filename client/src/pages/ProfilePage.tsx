@@ -1,14 +1,76 @@
+import { useEffect, useState } from 'react';
 import { useStore } from '../context/store';
 import { useNavigate } from 'react-router-dom';
 import Header from '../components/Header';
+import { apiGet, apiPut } from '../services/api';
 import { formatNaira } from '../utils';
-import { LogOut, ChevronRight, MessageCircle, ShieldAlert, Users, Wallet, CalendarDays, Tag, BookOpen, Download, Trash2, Type, ListChecks, HelpCircle } from 'lucide-react';
+import { LogOut, ChevronRight, MessageCircle, ShieldAlert, Users, Wallet, CalendarDays, Tag, BookOpen, Download, Trash2, Type, ListChecks, HelpCircle, RefreshCw } from 'lucide-react';
+
+interface BotStatus {
+  webhookConfigured: boolean;
+  sendingConfigured: boolean;
+  linkedPhone: string | null;
+  ready: boolean;
+}
+
+const BOT_COMMANDS = [
+  { command: 'balance', note: 'what you have left' },
+  { command: 'spend 850 for data', note: 'record an expense' },
+  { command: 'received 60000 allowance', note: 'record income' },
+  { command: 'goals', note: 'savings goal progress' },
+  { command: 'insights', note: 'where your money is going' },
+  { command: 'undo', note: 'remove the last thing recorded' },
+];
 
 export default function ProfilePage() {
   const navigate = useNavigate();
-  const { user, isDemoMode, logout, resetAll, textScale, setTextScale, savingsGoals, transactions, whatsapp, setWhatsapp } = useStore();
+  const { user, isDemoMode, logout, resetAll, textScale, setTextScale, savingsGoals, transactions, setUser } = useStore();
+  const [botStatus, setBotStatus] = useState<BotStatus | null>(null);
+  const [phoneDraft, setPhoneDraft] = useState('');
+  const [phonePending, setPhonePending] = useState(false);
+  const [phoneError, setPhoneError] = useState<string | null>(null);
+  const [phoneSaved, setPhoneSaved] = useState(false);
+
+  const loadBotStatus = async () => {
+    try {
+      const data = await apiGet('/whatsapp/status');
+      setBotStatus({
+        webhookConfigured: Boolean(data.webhookConfigured),
+        sendingConfigured: Boolean(data.sendingConfigured),
+        linkedPhone: data.linkedPhone || null,
+        ready: Boolean(data.ready),
+      });
+    } catch {
+      setBotStatus(null);
+    }
+  };
+
+  useEffect(() => { void loadBotStatus(); }, []);
+
+  const savePhone = async () => {
+    setPhonePending(true);
+    setPhoneError(null);
+    setPhoneSaved(false);
+    try {
+      const result = await apiPut('/auth/profile', { phoneNumber: phoneDraft });
+      if (user) setUser({ ...user, phoneNumber: result.phoneNumber });
+      setPhoneDraft('');
+      setPhoneSaved(true);
+      await loadBotStatus();
+    } catch (error) {
+      setPhoneError((error as Error).message);
+    } finally {
+      setPhonePending(false);
+    }
+  };
 
   const totalSaved = savingsGoals.reduce((s, g) => s + g.currentAmountInKobo, 0);
+
+  const missing: string[] = [
+    !botStatus?.linkedPhone && 'a linked WhatsApp number',
+    !botStatus?.webhookConfigured && 'the webhook keys (WHATSAPP_APP_SECRET, WHATSAPP_VERIFY_TOKEN)',
+    !botStatus?.sendingConfigured && 'the send keys (WHATSAPP_TOKEN, WHATSAPP_PHONE_NUMBER_ID)',
+  ].filter(Boolean) as string[];
 
   const menu = [
     // A real account can rebuild its plan; the demo persona's figures are pinned.
@@ -20,13 +82,6 @@ export default function ProfilePage() {
     { label: 'Student deals', desc: 'Save on essentials', icon: Tag, path: '/offers', tint: 'bg-pink-50 text-pink-600' },
     { label: 'Money skills', desc: 'Guides & playbooks', icon: BookOpen, path: '/literacy', tint: 'bg-indigo-50 text-indigo-600' },
     { label: 'Help & support', desc: 'FAQs & feedback', icon: HelpCircle, path: '/help', tint: 'bg-surface-100 text-surface-600' },
-  ];
-
-  const toggles: { key: keyof typeof whatsapp; label: string }[] = [
-    { key: 'budgetReminders', label: 'Budget reminders' },
-    { key: 'savingsUpdates', label: 'Savings updates' },
-    { key: 'weeklyDigest', label: 'Weekly digest' },
-    { key: 'lowBalanceAlerts', label: 'Low-balance alerts' },
   ];
 
   const exportData = () => {
@@ -95,28 +150,72 @@ export default function ProfilePage() {
 
         {/* WhatsApp assistant */}
         <div className="card p-5">
-          <div className="flex items-center gap-3 mb-3">
-            <div className="w-10 h-10 bg-emerald-50 rounded-xl flex items-center justify-center"><MessageCircle size={18} className="text-emerald-700" /></div>
+          <div className="flex items-start gap-3 mb-4">
+            <div className="w-10 h-10 bg-emerald-50 rounded-xl flex items-center justify-center shrink-0"><MessageCircle size={18} className="text-emerald-700" /></div>
             <div className="flex-1">
               <p className="font-bold text-navy-900 text-sm">WhatsApp assistant</p>
-              <p className="text-xs text-surface-500">Reminders & guidance via WhatsApp</p>
+              <p className="text-xs text-surface-500">Text your number from WhatsApp to check balance, record spend, see goals and get insights.</p>
             </div>
-            <button onClick={() => setWhatsapp({ enabled: !whatsapp.enabled })} role="switch" aria-checked={whatsapp.enabled} aria-label="WhatsApp assistant" className={`p-2.5 -m-2.5 cursor-pointer`}><span className={`block w-12 h-7 rounded-full transition-colors relative ${whatsapp.enabled ? 'bg-emerald-500' : 'bg-surface-200'}`}>
-              <span className={`w-6 h-6 bg-white rounded-full absolute top-0.5 shadow transition-transform ${whatsapp.enabled ? 'translate-x-5' : 'translate-x-0.5'}`} />
-            </span></button>
+            <button onClick={() => void loadBotStatus()} aria-label="Refresh WhatsApp assistant status" className="p-2 -m-2 text-surface-500 hover:text-navy-900 cursor-pointer"><RefreshCw size={15} /></button>
           </div>
-          {whatsapp.enabled && (
-            <div className="space-y-2.5 pt-2 border-t border-surface-100 animate-fade-in">
-              {toggles.map(t => (
-                <div key={t.key} className="flex items-center justify-between">
-                  <span className="text-sm text-surface-600">{t.label}</span>
-                  <button onClick={() => setWhatsapp({ [t.key]: !whatsapp[t.key] })} role="switch" aria-checked={whatsapp[t.key]} aria-label={t.label} className="p-2.5 -m-2.5 cursor-pointer"><span className={`block w-10 h-6 rounded-full transition-colors relative ${whatsapp[t.key] ? 'bg-primary-600' : 'bg-surface-200'}`}>
-                    <span className={`w-5 h-5 bg-white rounded-full absolute top-0.5 shadow transition-transform ${whatsapp[t.key] ? 'translate-x-4' : 'translate-x-0.5'}`} />
-                  </span></button>
-                </div>
-              ))}
-            </div>
+
+          <div className="flex flex-wrap items-center gap-2 mb-4">
+            {botStatus?.ready ? (
+              <span className="badge badge-success">Live</span>
+            ) : (
+              <span className="badge badge-info">Set up needed</span>
+            )}
+            <p className="text-xs text-surface-600">
+              Linked number: <span className="font-semibold text-navy-900">{botStatus?.linkedPhone || 'none'}</span>
+            </p>
+          </div>
+
+          {!botStatus?.ready && (
+            <p className="text-[11px] text-surface-500 bg-surface-50 rounded-xl p-3 mb-4">
+              {botStatus
+                ? `Not reachable from WhatsApp yet — this server is missing ${missing.join(' and ')}. Commands that do arrive are answered in the server console instead.`
+                : 'Checking the connection…'}
+            </p>
           )}
+
+          <div className="space-y-2 mb-4">
+            {BOT_COMMANDS.map(({ command, note }) => (
+              <div key={command} className="flex items-center gap-3">
+                <code className="text-[11px] font-semibold text-emerald-800 bg-emerald-50 rounded-lg px-2 py-1 shrink-0">{command}</code>
+                <span className="text-[11px] text-surface-500">{note}</span>
+              </div>
+            ))}
+          </div>
+
+          <div className="pt-4 border-t border-surface-100">
+            <label htmlFor="wa-phone" className="block text-xs font-semibold text-navy-900 mb-1.5">
+              WhatsApp number on your account
+            </label>
+            <div className="flex gap-2">
+              <input
+                id="wa-phone"
+                type="tel"
+                inputMode="tel"
+                autoComplete="tel"
+                value={phoneDraft}
+                onChange={e => { setPhoneDraft(e.target.value); setPhoneError(null); setPhoneSaved(false); }}
+                placeholder={botStatus?.linkedPhone || '08012345678'}
+                className="flex-1 min-w-0 px-3 py-2.5 rounded-xl border border-surface-200 text-sm focus:border-navy-700 focus:outline-none"
+              />
+              <button
+                onClick={() => void savePhone()}
+                disabled={phonePending || !phoneDraft.trim()}
+                className="px-4 py-2.5 rounded-xl bg-navy-900 text-white text-sm font-semibold disabled:opacity-40 cursor-pointer"
+              >
+                {phonePending ? 'Saving…' : 'Link'}
+              </button>
+            </div>
+            <p className="text-[11px] text-surface-500 mt-2">
+              Use the same number you sign in with, so the assistant can find your ledger.
+            </p>
+            {phoneError && <p role="alert" className="text-[11px] text-red-600 mt-1.5">{phoneError}</p>}
+            {phoneSaved && <p className="text-[11px] text-emerald-700 mt-1.5">Number linked.</p>}
+          </div>
         </div>
 
         </div>
