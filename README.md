@@ -1,6 +1,6 @@
-# Moneva — Smart Student Finance Companion
+# Allawii — Smart Student Finance Companion
 
-Moneva helps a Nigerian university student answer one question at any moment: *what can I safely spend right now, and what happens if I don't?*
+Allawii helps a Nigerian university student answer one question at any moment: *what can I safely spend right now, and what happens if I don't?*
 
 Built for the B Moni × TINC26 hackathon. Mobile-first, offline-first, sandbox-only — no real money moves anywhere in the app.
 
@@ -101,7 +101,7 @@ All figures are synthetic. Nothing in demo mode contacts a bank or moves money.
 ## Project Structure
 
 ```
-moneva/
+allawii/
 ├── client/src/
 │   ├── components/   Header, BottomNav
 │   ├── context/      store.ts — state, budget engine, adaptive re-plan
