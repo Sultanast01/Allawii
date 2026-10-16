@@ -1,14 +1,16 @@
 import db from '../models/database.js';
 import {
   addToGoal,
+  appCategory,
   BotError,
   getSummary,
   linkAccount,
   logExpense,
   transferBudget,
+  type BotBudget,
   type BotSummary,
 } from '../services/bot-gateway.js';
-import { extractLinkCode, guessCategory, parseAmount } from './intents.js';
+import { extractLinkCode, firstName, formatBudgets, formatHelp, guessCategory, parseAmount } from './intents.js';
 import { TelegramClient, type ReplyMarkup, type TelegramUpdate } from './telegram.js';
 
 const naira = (amount: number) => '₦' + Math.round(Number(amount) || 0).toLocaleString('en-NG');
@@ -17,9 +19,16 @@ const MENU: ReplyMarkup = {
   keyboard: [
     ["What's my safe spend today?", "What's my balance?"],
     ['How are my budgets?', 'My savings goals'],
+    ['What can you do?', "What's my streak?"],
   ],
   resize_keyboard: true,
 };
+
+/** Listed in Telegram's own command menu, so /help is discoverable before anyone types it. */
+const HELP_COMMANDS = [
+  { command: 'start', description: 'How to link your Allawii account' },
+  { command: 'help', description: 'What I can do, with example phrasings' },
+];
 
 const buttons = (pairs: [string, string][]): ReplyMarkup => ({
   inline_keyboard: [pairs.map(([text, data]) => ({ text, callback_data: data }))],
@@ -65,7 +74,7 @@ async function withUser(chatId: number, action: (userId: string) => Promise<void
     console.error('Telegram lookup failed:', (error as Error).message);
   }
   if (!userId) {
-    await say(chatId, 'Link your account first: open Allawii, press the Telegram button on your Profile, and send the six-digit code it shows.');
+    await say(chatId, 'Link your account first: open Allawii, press the Telegram button on your Profile, and send the six-digit code it shows. Send /help meanwhile to see what I can do.');
     return;
   }
   try {
@@ -80,11 +89,11 @@ async function withUser(chatId: number, action: (userId: string) => Promise<void
   }
 }
 
-function nudgeIfNeeded(chatId: number, category: string, budget: { limit: number; spent: number } | undefined, at = BUDGET_NUDGE_AT) {
+function nudgeIfNeeded(chatId: number, category: string, label: string, budget: BotBudget | undefined, at = BUDGET_NUDGE_AT) {
   if (!budget || budget.limit <= 0 || budget.spent / budget.limit < at) return;
   void say(
     chatId,
-    `Your ${category} budget is getting close to its limit. Want a simple adjustment?`,
+    `Your ${label} budget is getting close to its limit. Want a simple adjustment?`,
     buttons([['Show suggestion', `sugg:${category}`], ['Not now', 'dismiss']]),
   );
 }
@@ -121,10 +130,13 @@ async function handleMessage(chatId: number, rawText: string) {
     }
 
     if (/(spent|paid|bought)/.test(text) && amount) {
-      const category = guessCategory(text);
-      const next = await logExpense(userId, { amount, category });
-      await say(chatId, `Logged ${naira(amount)} on ${category}.\nBalance: ${naira(next.balance)}\nSafe to spend today: ${naira(next.safeToSpendToday)}`);
-      nudgeIfNeeded(chatId, category, next.budgets[category]);
+      const guess = guessCategory(text);
+      const next = await logExpense(userId, { amount, category: guess });
+      // The ledger stores the mapped category, so "data" only matches a plan row as "data_airtime".
+      const key = appCategory(guess);
+      const budget = next.budgets[key];
+      await say(chatId, `Logged ${naira(amount)} on ${budget?.label || guess}.\nBalance: ${naira(next.balance)}\nSafe to spend today: ${naira(next.safeToSpendToday)}`);
+      nudgeIfNeeded(chatId, key, budget?.label || guess, budget);
       return;
     }
 
@@ -139,8 +151,7 @@ async function handleMessage(chatId: number, rawText: string) {
     }
 
     if (/budget/.test(text)) {
-      const lines = Object.entries(summary.budgets).map(([category, budget]) => `${category}: ${naira(budget.spent)} / ${naira(budget.limit)}`);
-      await say(chatId, lines.length ? lines.join('\n') : 'No budgets yet. Set them up in the app.');
+      await say(chatId, formatBudgets(summary.budgets));
       return;
     }
 
@@ -154,7 +165,7 @@ async function handleMessage(chatId: number, rawText: string) {
       return;
     }
 
-    await say(chatId, 'I can help with your balance, safe spend, budgets and goals, or log things like "I spent 1500 on lunch".', MENU);
+    await say(chatId, formatHelp(firstName(summary.name)), MENU);
   });
 }
 
@@ -194,17 +205,21 @@ async function handleCallback(chatId: number, data: string, callbackId: string) 
       }
       const room = donor.budget.limit - donor.budget.spent;
       const moveAmount = Math.min(2000, room);
+      const needing = summary.budgets[first]?.label || first;
+      const donorLabel = summary.budgets[donor.category]?.label || donor.category;
       await say(
         chatId,
-        `Move ${naira(moveAmount)} from ${donor.category} to ${first}? ${donor.category} has ${naira(room)} unused.`,
+        `Move ${naira(moveAmount)} from ${donorLabel} to ${needing}? ${donorLabel} has ${naira(room)} unused.`,
         buttons([['Apply', `apply:${donor.category}:${first}:${moveAmount}`], ['Skip', 'dismiss']]),
       );
       return;
     }
 
     if (action === 'apply') {
-      await transferBudget(userId, first, second || '', Number(third));
-      await say(chatId, `Done. ${naira(Number(third))} moved from ${first} to ${second}.`);
+      const after = await transferBudget(userId, first, second || '', Number(third));
+      const from = after.budgets[first || '']?.label || first;
+      const to = after.budgets[second || '']?.label || second;
+      await say(chatId, `Done. ${naira(Number(third))} moved from ${from} to ${to}.`);
     }
   });
 }
@@ -218,10 +233,25 @@ function pickDonor(summary: BotSummary, needing: string): { category: string; bu
   return top ? { category: top[0], budget: top[1] } : null;
 }
 
+/** The capability list, named for the account this chat is linked to when there is one. */
+async function helpFor(chatId: number): Promise<string> {
+  const userId = await ownedUserId(chatId);
+  if (!userId) return formatHelp();
+  try {
+    return formatHelp(firstName((await getSummary(userId)).name));
+  } catch (error) {
+    console.error('Telegram help lookup failed:', (error as Error).message);
+    return formatHelp();
+  }
+}
+
 async function linkChat(chatId: number, code: string, alreadyLinked: boolean) {
   try {
-    await linkAccount(code, chatId);
-    await say(chatId, 'Linked! Ask me about your balance or safe spend.', MENU);
+    const { userId } = await linkAccount(code, chatId);
+    const summary = await getSummary(userId);
+    const name = firstName(summary.name);
+    await say(chatId, name ? `Linked to ${name}'s account.` : 'Linked!', MENU);
+    await say(chatId, formatHelp(name), MENU);
   } catch (error) {
     const status = error instanceof BotError ? error.status : 500;
     if (status === 410) {
@@ -253,8 +283,17 @@ async function dispatch(update: TelegramUpdate) {
     return;
   }
 
+  if (/^\/(?:help|menu)\b/i.test(text)) {
+    await say(message.chat.id, await helpFor(message.chat.id), MENU);
+    return;
+  }
+
   if (/^\/start\b/i.test(text)) {
-    await say(message.chat.id, "Hi, I'm Allawii. Ask about your money, or say things like \"I spent 1500 on lunch\", \"save 2000\" or \"can I afford 6000?\". To connect your account, press the Telegram button in the Allawii app — it opens this chat with your link code already attached.", MENU);
+    if (alreadyLinked) {
+      await say(message.chat.id, await helpFor(message.chat.id), MENU);
+      return;
+    }
+    await say(message.chat.id, "Hi, I'm Allawii. Press the Telegram button in the Allawii app and it opens this chat with your six-digit link code already attached. Once linked, send /help and I will show you what I can do, with the exact phrasings to use.", MENU);
     return;
   }
 
@@ -286,7 +325,7 @@ async function runNudges() {
       const key = `${userId}:${category}:${day}`;
       if (budget.limit > 0 && budget.spent / budget.limit >= PROACTIVE_NUDGE_AT && !nudgedAlready.has(key)) {
         nudgedAlready.add(key);
-        nudgeIfNeeded(Number(chatId), category, budget, PROACTIVE_NUDGE_AT);
+        nudgeIfNeeded(Number(chatId), category, budget.label, budget, PROACTIVE_NUDGE_AT);
       }
     }
   }
@@ -342,6 +381,9 @@ export async function startTelegramBot(attempt = 0): Promise<boolean> {
 
   client = bot;
   running = true;
+  await bot.setMyCommands(HELP_COMMANDS).catch(error => {
+    console.error('Telegram command menu not updated:', (error as Error).message);
+  });
   void pollLoop(bot);
   nudgeTimer = setInterval(() => { void runNudges(); }, NUDGE_MINUTES * 60 * 1000);
   nudgeTimer.unref?.();

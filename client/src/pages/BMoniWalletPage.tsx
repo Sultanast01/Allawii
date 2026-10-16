@@ -46,7 +46,7 @@ function kycVerdict(sandbox: Sandbox): { title: string; label: string; tone: 'ok
 
 export default function BMoniWalletPage() {
   const navigate = useNavigate();
-  const { savingsGoals, getMonthlyAllowance } = useStore();
+  const { savingsGoals, getMonthlyAllowance, user } = useStore();
   const [sandbox, setSandbox] = useState<Sandbox | null>(null);
   const [rate, setRate] = useState<any | null>(null);
   const [banks, setBanks] = useState<{ bankName: string; bankCode: string }[]>([]);
@@ -86,6 +86,10 @@ export default function BMoniWalletPage() {
   const matches = (banks.length ? banks : [])
     .filter(b => !q || b.bankName.toLowerCase().includes(q))
     .slice(0, 30);
+
+  /** The name B Moni filed their test record under. It is theirs, not the user's Allawii identity. */
+  const filedName = [sandbox?.profile?.firstName, sandbox?.profile?.lastName].filter(Boolean).join(' ').trim();
+  const accountName = user?.name?.trim() || filedName || 'Sandbox user';
 
   const loadAll = useCallback(async () => {
     setError(null);
@@ -273,8 +277,11 @@ export default function BMoniWalletPage() {
                   <ShieldCheck size={11} /> Live
                 </span>
               </div>
-              <h2 className="text-xl font-bold">{sandbox.profile?.firstName} {sandbox.profile?.lastName}</h2>
-              <p className="text-xs text-primary-200 mt-0.5">{sandbox.profile?.email} &middot; {sandbox.profile?.phoneNumber}</p>
+              <h2 className="text-xl font-bold">{accountName}</h2>
+              <p className="text-xs text-primary-200 mt-0.5">B Moni test contact: {sandbox.profile?.email} &middot; {sandbox.profile?.phoneNumber}</p>
+              {filedName && filedName !== accountName && (
+                <p className="text-[11px] text-navy-200 mt-1.5">They hold this record as {filedName}; your Allawii name is unchanged.</p>
+              )}
               <p className="text-[11px] text-navy-200 font-mono mt-3 break-all">id: {sandbox.bmoniUserId}</p>
               <div className="flex items-center justify-between mt-4 pt-3 border-t border-white/10">
                 <span className="text-[11px] text-navy-200">Partner</span>

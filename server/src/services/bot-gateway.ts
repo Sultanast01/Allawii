@@ -64,14 +64,32 @@ function cycleStartMs(nextIncomeDate: string | null | undefined, cycleDays: numb
   return new Date(now.getFullYear(), now.getMonth(), 1).getTime();
 }
 
+export interface BotBudget {
+  limit: number;
+  spent: number;
+  /** What the user called this row, so the assistant never replies with a raw category id. */
+  label: string;
+}
+
 export interface BotSummary {
+  /** The name on the account, so the assistant greets a person instead of a chat id. */
+  name: string;
   /** Money still uncommitted for this cycle — the same figure the app calls safe to spend. */
   balance: number;
   daysLeft: number;
   safeToSpendToday: number;
   streak: number;
-  budgets: Record<string, { limit: number; spent: number }>;
+  budgets: Record<string, BotBudget>;
   goals: { id: string; name: string; saved: number; target: number }[];
+}
+
+/** `data_airtime` reads as "Data & Airtime"; an internal row id has no business in a chat reply. */
+export function budgetLabel(name: unknown, category: string): string {
+  const clean = String(name || '').trim();
+  if (clean) return clean;
+  if (/^ob-/.test(category)) return 'Fixed commitment';
+  const words = category.replace(/[_-]+/g, ' ').trim();
+  return words.charAt(0).toUpperCase() + words.slice(1);
 }
 
 export async function getSummary(userId: string): Promise<BotSummary> {
@@ -99,11 +117,15 @@ export async function getSummary(userId: string): Promise<BotSummary> {
 
   const budgets: BotSummary['budgets'] = {};
   plansRaw.forEach((plan: any) => {
-    budgets[plan.category] = { limit: naira(plan.allocatedInKobo), spent: naira(spentByCategory[plan.category] || 0) };
+    budgets[plan.category] = {
+      limit: naira(plan.allocatedInKobo),
+      spent: naira(spentByCategory[plan.category] || 0),
+      label: budgetLabel(plan.name, plan.category),
+    };
     delete spentByCategory[plan.category];
   });
   Object.entries(spentByCategory).forEach(([category, spent]) => {
-    budgets[category] = { limit: 0, spent: naira(spent) };
+    budgets[category] = { limit: 0, spent: naira(spent), label: budgetLabel('', category) };
   });
 
   const goals = goalsRaw
@@ -126,6 +148,7 @@ export async function getSummary(userId: string): Promise<BotSummary> {
   goalsRaw.forEach((goal: any) => (goal.contributionDates || []).forEach((d: string) => streakDates.add(d)));
 
   return {
+    name: String(profile?.name || '').trim(),
     balance: naira(safeToSpendInKobo),
     daysLeft,
     safeToSpendToday: naira(Math.floor(safeToSpendInKobo / daysLeft)),
@@ -151,6 +174,12 @@ export async function linkAccount(code: string, chatId: string | number): Promis
   await db.botLinks.link(cleanChat, profile.id);
   await db.users.update(profile.id, { botLinkCode: null, botLinkExpiresAt: null });
   return { userId: profile.id };
+}
+
+/** The ledger category behind a word the user typed, so lookups match the plan rows. */
+export function appCategory(rawCategory: string): string {
+  const clean = String(rawCategory || '').toLowerCase();
+  return BOT_CATEGORY_TO_APP[clean]?.category || clean || 'other_expense';
 }
 
 export async function logExpense(

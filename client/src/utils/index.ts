@@ -103,3 +103,20 @@ export function getBucketLabel(bucket: string): string {
   };
   return labels[bucket] || bucket;
 }
+
+/**
+ * B Moni's compliance questionnaire defines its monthly-volume bands in US
+ * dollars and wants the answer back in dollars, so the band a user picks is sent
+ * unchanged. This only reads the same band in naira, at B Moni's own rate, so a
+ * money app that holds no dollars never looks like it is quoting one.
+ * Returns null when there is no rate to convert with, leaving the dollar label alone.
+ */
+export function nairaBandLabel(label: string, usdToNaira: number | null | undefined): string | null {
+  if (!usdToNaira || usdToNaira <= 0) return null;
+  const bounds = String(label || '').match(/\d[\d,]*/g);
+  if (!bounds) return null;
+  const short = (naira: number) => naira >= 1_000_000
+    ? `₦${(naira / 1_000_000).toFixed(1)}m`
+    : '₦' + Math.round(naira).toLocaleString('en-NG');
+  return bounds.map(bound => short(Number(bound.replace(/,/g, '')) * usdToNaira)).join(' – ');
+}

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Header from '../components/Header';
 import { bmoni } from '../services/api';
+import { nairaBandLabel } from '../utils';
 import {
   Loader2, ShieldCheck, IdCard, FileText, Camera, AlertTriangle,
   ChevronLeft, PartyPopper, Upload, Clock,
@@ -140,6 +141,8 @@ export default function KycVerificationPage() {
   const [profile, setProfile] = useState<any>(null);
   const [options, setOptions] = useState<KycOptions | null>(null);
   const [occupations, setOccupations] = useState<Occupation[]>([]);
+  /** B Moni's own live dollar rate, used only to read their USD bands in naira. */
+  const [usdRate, setUsdRate] = useState<{ naira: number; label: string } | null>(null);
 
   const [step, setStep] = useState<Step>('identity');
   const [busy, setBusy] = useState(false);
@@ -172,10 +175,11 @@ export default function KycVerificationPage() {
   useEffect(() => {
     (async () => {
       try {
-        const [status, opts, occs] = await Promise.all([
+        const [status, opts, occs, rate] = await Promise.all([
           loadStatus(),
           bmoni.kycOptions().catch(() => null),
           bmoni.kycOccupations().catch(() => []),
+          bmoni.rate('USD').catch(() => null),
         ]);
         if (!status.profile) {
           setLoadError('Link a B Moni sandbox identity on the wallet page first.');
@@ -183,6 +187,10 @@ export default function KycVerificationPage() {
         }
         setOptions(opts);
         setOccupations(Array.isArray(occs) ? occs : []);
+        const inverse = Number((rate as any)?.inverseRate);
+        if (inverse > 0) {
+          setUsdRate({ naira: inverse, label: String((rate as any)?.inverseLabel || `$1 = ₦${inverse.toLocaleString('en-NG')}`) });
+        }
         setStep(stepFor(status.kycReadiness ?? null, status.kycReview ?? null));
       } catch (e: any) {
         setLoadError(e.message || 'Could not load verification state');
@@ -356,6 +364,12 @@ export default function KycVerificationPage() {
   const indicatorStep: Step = step === 'done' ? 'activate' : step;
   const stepNumber = step === 'done' || step === 'review' ? visibleSteps.length : visibleSteps.indexOf(step) + 1;
 
+  /** Their USD band, read in naira too. The value submitted stays the dollar figure. */
+  const volumeBand = (label: string) => {
+    const inNaira = nairaBandLabel(label, usdRate?.naira);
+    return inNaira ? `${label} · about ${inNaira}` : label;
+  };
+
   return (
     <div>
       <Header title="Verify identity" />
@@ -461,14 +475,19 @@ export default function KycVerificationPage() {
                 </select>
               </label>
               <label className="text-xs text-surface-600">
-                Monthly volume *
+                Monthly volume (B Moni asks in dollars) *
                 <select value={identity.estimatedMonthlyVolume} onChange={e => setIdentity({ ...identity, estimatedMonthlyVolume: Number(e.target.value) })} className="input-field text-sm mt-1">
                   {(options?.estimatedMonthlyVolumeRanges ?? [{ label: '$0-$4,999', value: 4999 }]).map(r => (
-                    <option key={r.value} value={r.value}>{r.label}</option>
+                    <option key={r.value} value={r.value}>{volumeBand(r.label)}</option>
                   ))}
                 </select>
               </label>
             </div>
+            <p className="text-[11px] text-surface-400">
+              The volume bands are B Moni&apos;s own compliance question, and they define it in US
+              dollars{usdRate ? ` — the naira figures are their live rate (${usdRate.label})` : ''}.
+              Allawii holds only naira; nothing here is a dollar balance.
+            </p>
             <label className="text-xs text-surface-600 block">
               Account purpose *
               <select value={identity.accountPurpose} onChange={e => setIdentity({ ...identity, accountPurpose: e.target.value })} className="input-field text-sm mt-1">

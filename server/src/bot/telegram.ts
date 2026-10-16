@@ -62,6 +62,11 @@ export class TelegramClient {
     return this.call('answerCallbackQuery', { callback_query_id: callbackQueryId }, 10_000).catch(() => null);
   }
 
+  /** Fills the command menu Telegram shows beside the text field. */
+  setMyCommands(commands: { command: string; description: string }[]) {
+    return this.call('setMyCommands', { commands }, 15_000);
+  }
+
   /** Waits up to POLL_SECONDS for new activity, then returns whatever arrived. */
   getUpdates(offset: number) {
     return this.call<TelegramUpdate[]>('getUpdates', {
