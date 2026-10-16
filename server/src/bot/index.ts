@@ -47,12 +47,42 @@ let nudgeTimer: NodeJS.Timeout | null = null;
 const nudgedAlready = new Set<string>();
 
 export function isTelegramBotRunning(): boolean {
-  return running;
+  // A webhook-configured deployment answers Telegram's POSTs instead of holding a poll
+  // open, so there is no loop to report — the configured URL is the proof it is reachable.
+  return running || Boolean(telegramWebhookUrl());
 }
 
 /** The username Telegram reports for this token; TELEGRAM_BOT_USERNAME is only a placeholder. */
 export function telegramBotUsername(): string | null {
   return detectedUsername || process.env.TELEGRAM_BOT_USERNAME || null;
+}
+
+/**
+ * Where Telegram should post updates. Set TELEGRAM_WEBHOOK_URL to the full https URL of
+ * /api/telegram/webhook; on Vercel the deployment's own host is used when it is unset.
+ */
+export function telegramWebhookUrl(): string | null {
+  const explicit = String(process.env.TELEGRAM_WEBHOOK_URL || '').trim();
+  if (explicit) return /^https?:\/\//.test(explicit) ? explicit : `https://${explicit}`;
+  const host = String(process.env.VERCEL_PROJECT_PRODUCTION_URL || process.env.VERCEL_URL || '').trim();
+  return host ? `https://${host}/api/telegram/webhook` : null;
+}
+
+/** Shared by webhook delivery and the scheduled sweep: a client without a poll loop. */
+async function assistantClient(): Promise<TelegramClient | null> {
+  if (client) return client;
+  const token = String(process.env.TELEGRAM_BOT_TOKEN || '').trim();
+  if (!token) return null;
+  const bot = new TelegramClient(token);
+  try {
+    detectedUsername = (await bot.getMe()).username;
+  } catch (error) {
+    console.error('Telegram assistant: token rejected by getMe —', (error as Error).message);
+    return null;
+  }
+  client = bot;
+  void bot.setMyCommands(HELP_COMMANDS).catch(() => null);
+  return bot;
 }
 
 const say = (chatId: number | string, text: string, markup?: ReplyMarkup) =>
@@ -302,17 +332,18 @@ async function dispatch(update: TelegramUpdate) {
 }
 
 /** Proactive sweep: one nudge per category per day once a budget is 90% gone. */
-async function runNudges() {
-  if (!client) return;
+export async function runNudges(): Promise<number> {
+  if (!(await assistantClient())) return 0;
   const day = new Date().toDateString();
   let links: { chatId: string; userId: string }[] = [];
   try {
     links = await db.botLinks.all();
   } catch (error) {
     console.error('Telegram nudge sweep failed:', (error as Error).message);
-    return;
+    return 0;
   }
 
+  let sent = 0;
   for (const { chatId, userId } of links) {
     let summary: BotSummary;
     try {
@@ -325,10 +356,52 @@ async function runNudges() {
       const key = `${userId}:${category}:${day}`;
       if (budget.limit > 0 && budget.spent / budget.limit >= PROACTIVE_NUDGE_AT && !nudgedAlready.has(key)) {
         nudgedAlready.add(key);
+        sent += 1;
         nudgeIfNeeded(Number(chatId), category, budget.label, budget, PROACTIVE_NUDGE_AT);
       }
     }
   }
+  return sent;
+}
+
+/**
+ * One Telegram update delivered by webhook instead of by polling. The reply is the same
+ * dispatch either way, so a serverless host and a Node host behave identically.
+ * Returns false when this process has no token to answer with.
+ */
+export async function handleTelegramWebhook(update: TelegramUpdate): Promise<boolean> {
+  if (!(await assistantClient())) return false;
+  await dispatch(update);
+  return true;
+}
+
+/** Point Telegram at this deployment; polling must not be running at the same time. */
+export async function configureTelegramWebhook(url = telegramWebhookUrl()) {
+  if (!url) throw new Error('No webhook URL: set TELEGRAM_WEBHOOK_URL, or deploy where the host is known');
+  const token = String(process.env.TELEGRAM_BOT_TOKEN || '').trim();
+  if (!token) throw new Error('TELEGRAM_BOT_TOKEN is not set');
+  const secret = webhookSecret();
+  const bot = new TelegramClient(token);
+  await bot.setWebhook(url, secret);
+  if (!client) {
+    detectedUsername = (await bot.getMe().catch(() => null))?.username || null;
+    client = bot;
+  }
+  return { url, secretSet: Boolean(secret), webhook: await bot.getWebhookInfo() };
+}
+
+/** Hand delivery back to getUpdates, for going from a deployment to a local dev bot. */
+export async function removeTelegramWebhook() {
+  const token = String(process.env.TELEGRAM_BOT_TOKEN || '').trim();
+  if (!token) throw new Error('TELEGRAM_BOT_TOKEN is not set');
+  const bot = new TelegramClient(token);
+  await bot.deleteWebhook();
+  return { url: '', webhook: await bot.getWebhookInfo() };
+}
+
+/** The value Telegram must send back in X-Telegram-Bot-Api-Secret-Token on every update. */
+export function webhookSecret(): string {
+  return String(process.env.TELEGRAM_WEBHOOK_SECRET || process.env.BOT_API_KEY || '').trim();
 }
 
 async function pollLoop(bot: TelegramClient) {
@@ -359,6 +432,10 @@ async function pollLoop(bot: TelegramClient) {
  * the rest of the session.
  */
 export async function startTelegramBot(attempt = 0): Promise<boolean> {
+  if (telegramWebhookUrl()) {
+    console.log(`Telegram assistant: webhook mode, so polling stays off — ${telegramWebhookUrl()}`);
+    return false;
+  }
   const token = String(process.env.TELEGRAM_BOT_TOKEN || '').trim();
   if (!token) {
     console.log('Telegram assistant: offline (TELEGRAM_BOT_TOKEN not set)');

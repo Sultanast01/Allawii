@@ -67,6 +67,29 @@ export class TelegramClient {
     return this.call('setMyCommands', { commands }, 15_000);
   }
 
+  /**
+   * Switches delivery from getUpdates to POSTs at `url`. `secret` comes back in the
+   * X-Telegram-Bot-Api-Secret-Token header of every update, so the endpoint can prove
+   * the request is Telegram's rather than someone imitating a user's message.
+   */
+  setWebhook(url: string, secret: string) {
+    return this.call('setWebhook', {
+      url,
+      secret_token: secret,
+      drop_pending_updates: false,
+      allowed_updates: ['message', 'callback_query'],
+    }, 15_000);
+  }
+
+  deleteWebhook() {
+    return this.call('deleteWebhook', { drop_pending_updates: false }, 15_000);
+  }
+
+  /** What Telegram believes it is currently doing — the check after a setup attempt. */
+  getWebhookInfo() {
+    return this.call<{ url: string; pending_update_count: number; last_error_message?: string }>('getWebhookInfo', {}, 15_000);
+  }
+
   /** Waits up to POLL_SECONDS for new activity, then returns whatever arrived. */
   getUpdates(offset: number) {
     return this.call<TelegramUpdate[]>('getUpdates', {

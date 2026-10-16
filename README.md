@@ -26,6 +26,80 @@ server logs `Telegram assistant: live as @your_bot`; without `TELEGRAM_BOT_TOKEN
 
 The app is usable with the server switched off — only the B Moni screens need it.
 
+## Deploying
+
+Two shapes, both from this one repo. They share `server/src/app.ts`; only the entry file differs.
+
+**Vercel** — one project, two services, declared in the root `vercel.json`:
+
+| Service | Serves | Built from |
+|---|---|---|
+| `client` | the SPA on every path that is not `/api/…` | `client/` (`npm run build` → `client/dist`) |
+| `server` | `/api/…`, the Telegram webhook and the cron | `server/` (`npm run build` → `server/dist`, entry `server/index.mjs`) |
+
+Each service installs and builds in its own directory with its own lockfile, so there is no
+combined install step and no copy of the SPA into a shared `public/`. The two top-level rewrites
+are what make them reachable — a service is internal until one points at it — and Vercel hands
+the service the **original** path, so Express keeps its `/api/auth`, `/api/sync` … mounts
+exactly as they are locally. No `bindings` are declared: bindings exist for one service to call
+another privately over the internal network, and here the browser reaches the API through the
+same public domain.
+
+```bash
+npx vercel link      # once, in the repo root
+npx vercel           # preview
+npx vercel --prod
+```
+
+Or connect the GitHub repository in the dashboard. **Set Root Directory to the repository root**
+(Settings → General → Root Directory): `vercel.json` is only read from there, and a project left
+pointing at `client` ignores it — that deployment ships the SPA alone, so `/api/*` answers
+`index.html` and every sign-in fails with "Login failed". `GET /api/health` returning JSON is the
+proof the API service is actually wired up.
+
+Then, once per deploy, hand Telegram the webhook URL — Vercel has no process left running to
+long-poll with, so the assistant is push-driven there:
+
+```bash
+curl -X POST https://YOUR-APP.vercel.app/api/telegram/webhook/setup \
+  -H "Authorization: Bearer $BOT_API_KEY"
+```
+
+It replies with the URL it registered and Telegram's own `getWebhookInfo`. Put these in the
+project's Environment Variables tab, never in the repo: `SUPABASE_URL`, `SUPABASE_ANON_KEY`,
+`SUPABASE_SERVICE_ROLE_KEY`, `BMONI_API_KEY`, `BMONI_BASE_URL`, `TELEGRAM_BOT_TOKEN`,
+`BOT_API_KEY`, `DEMO_PASSWORD`, and `CRON_SECRET` (which is what authorises the daily
+`/api/telegram/nudges` call). They land in both services, but only `server` reads them — the
+browser never holds a Supabase key, it only calls `/api`. `ALLOWED_ORIGINS` stays unset, since
+app and API share one origin there.
+
+Two things are genuinely smaller on Vercel, not broken: the nudge sweep runs once a day, because
+Hobby crons reject a more frequent schedule (a Node host still runs it every 10 minutes), and an
+uploaded file must stay under 4.5 MB, the platform's request body limit.
+
+Locally, `vercel dev -L` runs both services together against this `vercel.json`, no login needed.
+
+**Any persistent Node host** — Render, Railway, Fly, a VPS — runs the same app plus the poll loop:
+
+```bash
+npm run install:all
+npm run build          # client/dist + server/dist
+npm start              # node server/dist/host.js — app, /api and the polling assistant
+```
+
+| Setting | Value |
+|---|---|
+| Build command | `npm run install:all && npm run build` |
+| Start command | `npm start` |
+| Health check path | `/api/health` |
+
+Leave `TELEGRAM_WEBHOOK_URL` unset there, or the poller stays off by design.
+
+Either way, an unmatched `/api` path returns **JSON**, never HTML, and unknown non-`/api` GETs fall
+back to `index.html` (so `/login` and `/calendar` deep-link). The JSON matters: an API call answered
+with the SPA's HTML is what makes a deployed build report `Login failed` with nothing useful in it,
+because the client reads a 200 and finds no token in the body.
+
 ## What is real and what is simulated
 
 | Area | Status |
@@ -141,14 +215,15 @@ The signature is always produced by the user's own browser wallet — the backen
 
 ## Telegram Assistant
 
-The assistant is part of this server: it long-polls Telegram from the same process that serves the API and talks to the same Supabase ledger as the app, so a spend logged on Telegram is on the next app sync. Money logic lives in one place (`server/src/services/bot-gateway.ts`) and the bot only formats replies.
+The assistant is part of this server. On a Node host it long-polls Telegram from the same process that serves the API; on Vercel the same replies are driven by Telegram's webhook POSTs instead, because nothing stays running between requests. Either way it talks to the same Supabase ledger as the app, so a spend logged on Telegram is on the next app sync. Money logic lives in one place (`server/src/services/bot-gateway.ts`) and the bot only formats replies.
 
 | Piece | File | Role |
 | --- | --- | --- |
-| Bot loop | `server/src/bot/index.ts` | long-polling, `/start` and `/link`, replies, inline buttons, daily budget nudges |
-| Telegram transport | `server/src/bot/telegram.ts` | `getMe`/`sendMessage`/`answerCallbackQuery`/`getUpdates` over `fetch` - no bot SDK |
+| Bot loop | `server/src/bot/index.ts` | long-polling, `/start` and `/help`, replies, inline buttons, budget nudges |
+| Telegram transport | `server/src/bot/telegram.ts` | `getMe`/`sendMessage`/`answerCallbackQuery`/`getUpdates`/`setWebhook` over `fetch` - no bot SDK |
 | Intent parsing | `server/src/bot/intents.ts` | "1.5k", "3 days", and what a sentence is a purchase of |
 | Money abilities | `server/src/services/bot-gateway.ts` | summary, expense, goal contribution, budget transfer, link codes - naira in, kobo stored |
+| Webhook & schedule | `server/src/routes/telegram.ts` | `/api/telegram/webhook` (secret-checked), `/webhook/setup`, `/nudges` for a cron |
 | HTTP mirror | `server/src/routes/bot.ts` | `/api/bot/*` behind `BOT_API_KEY`, for anyone who still runs the [standalone bot repo](https://github.com/Sultanast01/allawii-bot) against this server |
 | Linking | `server/src/routes/bot.ts` + Profile screen | `/api/bot/user/link-code` mints a one-time 6-digit code; the user sends `/link 123456` to the bot |
 | Ledger sync | `server/src/routes/sync.ts` + `client/src/services/sync.ts` | last-write-wins merge, tombstones, server-only rows never destroyed |
@@ -161,7 +236,7 @@ What the bot understands: "I spent 1500 on lunch", "save 2000", "What's my balan
 2. In `server/.env`: set `TELEGRAM_BOT_TOKEN`. `TELEGRAM_BOT_USERNAME` is only a placeholder - the app shows the `@username` Telegram reports for that token. `npm run dev` then starts the assistant with the API; with no token it logs `offline` and the rest of the server is unaffected.
 3. In the app: **Profile -> Telegram assistant -> Generate link code**, then send `/link <code>` to the bot. The code is single-use and expires in 15 minutes; `GET /api/bot/user/status` reports the link state and whether the assistant is live.
 
-Long-polling means the server needs no public host, tunnel or webhook. Only one process may poll a token at a time - if you run the standalone bot repo against this server instead, leave `TELEGRAM_BOT_TOKEN` unset here so the in-process assistant stays offline.
+Long-polling needs no public host, tunnel or webhook, which is why local development uses it. Set `TELEGRAM_WEBHOOK_URL` (or deploy where the host is known) and the poller stays off and `/api/telegram/webhook` answers instead - one delivery method at a time, because Telegram will not let both have the same updates. If you run the standalone bot repo against this server instead, leave `TELEGRAM_BOT_TOKEN` unset here so the in-process assistant stays offline.
 
 **Identity rule:** the bot only sees a `userId` after the user proves possession of a code minted inside their authenticated app session. Unknown codes get "did not work", expired codes get an explicit error - no ledger detail is ever named for an unlinked chat.
 
@@ -195,6 +270,7 @@ All figures are synthetic. Nothing in demo mode contacts a bank or moves money.
 
 ```
 allawii/
+├── vercel.json       the two Vercel services and the public routing between them
 ├── client/src/
 │   ├── components/   Header, BottomNav, AuthLayout, AuthFields
 │   ├── context/      store.ts — state, budget engine, adaptive re-plan, starter plan
@@ -202,12 +278,16 @@ allawii/
 │   ├── services/     api.ts — authenticated calls to the Allowii backend
 │   ├── types/        domain models and category config
 │   └── utils/        naira formatting, safe-to-spend math
-└── server/src/
-    ├── bot/          index.ts — the Telegram assistant loop; telegram.ts — Bot API over fetch
-    ├── routes/       auth, transactions, bmoni, round-up, bot (HTTP mirror), sync
-    ├── services/     bmoni.ts — sandbox proxy; sync.ts — ledger merge; bot-gateway.ts — the assistant's money abilities
-    ├── lib/          supabase.ts — service-role + anon-key clients
-    └── models/       database.ts — Supabase Postgres repository
+└── server/
+    ├── index.mjs     Vercel's entry: the same Express app, no listener and no poll loop
+    ├── src/
+    │   ├── app.ts        the whole API, built the same for both hosts
+    │   ├── host.ts       the Node host: listens, serves the built SPA, polls Telegram
+    │   ├── bot/          index.ts — the Telegram assistant; telegram.ts — Bot API over fetch
+    │   ├── routes/       auth, transactions, bmoni, round-up, bot (HTTP mirror), telegram, sync
+    │   ├── services/     bmoni.ts — sandbox proxy; sync.ts — ledger merge; bot-gateway.ts — the assistant's money abilities
+    │   ├── lib/          supabase.ts — service-role + anon-key clients
+    │   └── models/       database.ts — Supabase Postgres repository
 ```
 
 ## Environment Variables
@@ -228,7 +308,10 @@ SUPABASE_SERVICE_ROLE_KEY=<service role secret — server-side only, bypasses RL
 # Telegram assistant (see "Telegram Assistant")
 TELEGRAM_BOT_TOKEN=<BotFather token — the assistant runs in this process>
 TELEGRAM_BOT_USERNAME=<optional placeholder; the app shows the username Telegram reports>
-BOT_API_KEY=<long random string, only for the /api/bot/* HTTP mirror>
+TELEGRAM_WEBHOOK_URL=<serverless only: full https URL of /api/telegram/webhook>
+TELEGRAM_WEBHOOK_SECRET=<optional; falls back to BOT_API_KEY — Telegram echoes it per update>
+BOT_API_KEY=<long random string, for the /api/bot/* mirror and the /api/telegram/* controls>
+CRON_SECRET=<Vercel only: authorises the daily /api/telegram/nudges call>
 DEMO_PASSWORD=<password for the auto-seeded demo persona>
 ```
 

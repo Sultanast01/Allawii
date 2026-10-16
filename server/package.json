@@ -4,10 +4,10 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "tsx watch src/index.ts",
+    "dev": "tsx watch src/host.ts",
     "build": "tsc",
     "test": "node --import tsx --test \"src/**/*.test.ts\"",
-    "start": "node dist/index.js"
+    "start": "node dist/host.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0",

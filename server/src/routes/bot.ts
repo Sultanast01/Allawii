@@ -19,7 +19,7 @@ import {
  * github.com/Sultanast01/allawii-bot against this server instead.
  */
 
-function botKeyOk(req: Request): boolean {
+export function botKeyOk(req: Request): boolean {
   const expected = process.env.BOT_API_KEY || '';
   if (!expected) return false;
   const provided = String(req.headers.authorization?.replace('Bearer ', '') || '');
