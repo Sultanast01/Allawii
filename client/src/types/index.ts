@@ -36,12 +36,14 @@ export interface Transaction {
   paymentMethod?: string;
   budgetBucket: 'obligations' | 'essentials' | 'future_you' | 'enjoyment';
   notes?: string;
-  source: 'manual' | 'csv' | 'receipt' | 'bmoni' | 'whatsapp';
+  source: 'manual' | 'csv' | 'receipt' | 'bmoni' | 'telegram';
   syncStatus: 'synced' | 'pending' | 'failed';
   receiptUrl?: string;
   recurringId?: string;
   updatedAt?: string;
 }
+
+export type SavingsType = 'emergency' | 'target' | 'flexible';
 
 export interface SavingsGoal {
   id: string;
@@ -52,6 +54,10 @@ export interface SavingsGoal {
   targetDate?: string;
   contributionPerCycleInKobo: number;
   contributionFrequency: 'daily' | 'weekly' | 'monthly';
+  /** What the pot is for: money you may need at any time, or money with a purpose attached. */
+  savingsType?: SavingsType;
+  /** When the money is meant to leave the pot — the date a goal becomes spendable. */
+  withdrawalDate?: string;
   progress: number;
   isPaused: boolean;
   createdAt: string;
@@ -83,7 +89,7 @@ export interface SavingsStreak {
   currentStreak: number;
   longestStreak: number;
   lastContributionDate?: string;
-  /** Local calendar days ('YYYY-MM-DD') on which money was added to a goal. Source of truth for the streak. */
+  /** Local calendar days ('YYYY-MM-DD') on which a goal was funded or a money lesson was finished. Source of truth for the streak. */
   contributionDates: string[];
 }
 
@@ -166,4 +172,5 @@ export const DEFAULT_CATEGORIES: CategoryConfig[] = [
   { id: 'social', name: 'Social Activities', icon: 'PartyPopper', bucket: 'enjoyment', color: '#f43f5e' },
   { id: 'eating_out', name: 'Eating Out', icon: 'Coffee', bucket: 'enjoyment', color: '#d946ef' },
   { id: 'shopping', name: 'Shopping', icon: 'ShoppingBag', bucket: 'enjoyment', color: '#f59e0b' },
+  { id: 'other_expense', name: 'Other', icon: 'Receipt', bucket: 'essentials', color: '#64748b' },
 ];

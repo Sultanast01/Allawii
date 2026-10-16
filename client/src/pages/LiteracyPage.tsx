@@ -136,7 +136,7 @@ export default function LiteracyPage() {
 
   return (
     <>
-      <Header title="Literacy Hub" showBack />
+      <Header title="Literacy Hub" />
 
       <div className="px-5 py-4 space-y-4 pb-8 lg:px-10">
         <div className="card p-4 bg-navy-800 border-navy-800">

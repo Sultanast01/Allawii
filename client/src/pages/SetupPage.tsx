@@ -1,10 +1,10 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { SPLIT_PRESETS, buildStarterPlan, useStore } from '../context/store';
 import type { SetupObligation, SplitPreset } from '../context/store';
 import { DEFAULT_CATEGORIES } from '../types';
 import type { Obligation, User } from '../types';
-import { formatNaira, nairaToKobo } from '../utils';
+import { formatNaira, koboToNaira, nairaToKobo } from '../utils';
 import { ArrowLeft, ArrowRight, Check, Plus, X } from 'lucide-react';
 
 const FREQUENCIES: { id: User['incomeFrequency']; label: string; hint: string }[] = [
@@ -20,15 +20,42 @@ function todayISO() {
   return new Date().toISOString().slice(0, 10);
 }
 
+/** Cadence step used to work out the next money date from the one that already arrived. */
+const CADENCE_DAYS: Record<User['incomeFrequency'], number | null> = { daily: 1, weekly: 7, monthly: 30, irregular: null };
+
+function slugify(value: string) {
+  return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+}
+
+function addCycleDays(iso: string, frequency: User['incomeFrequency']): string {
+  const days = CADENCE_DAYS[frequency];
+  if (!days || !iso) return '';
+  const d = new Date(`${iso}T00:00:00`);
+  if (Number.isNaN(d.getTime())) return '';
+  d.setDate(d.getDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+function subtractCycleDays(iso: string, frequency: User['incomeFrequency']): string {
+  const days = CADENCE_DAYS[frequency];
+  if (!days || !iso) return '';
+  const d = new Date(`${iso}T00:00:00`);
+  if (Number.isNaN(d.getTime())) return '';
+  d.setDate(d.getDate() - days);
+  return d.toISOString().slice(0, 10);
+}
+
 function AddRow({ onAdd }: { onAdd: (o: SetupObligation) => void }) {
   const [name, setName] = useState('');
   const [amount, setAmount] = useState('');
   const [frequency, setFrequency] = useState<Obligation['frequency']>('monthly');
   const [category, setCategory] = useState(OBLIGATION_CATEGORIES[0].id);
+  const [customCategory, setCustomCategory] = useState('');
   const [dueDate, setDueDate] = useState('');
 
   const value = Number(amount.replace(/[^\d.]/g, '')) || 0;
-  const valid = name.trim().length > 1 && value > 0;
+  const custom = customCategory.trim();
+  const valid = name.trim().length > 1 && value > 0 && (category !== 'other' || custom.length > 1);
 
   return (
     <div className="bg-surface-50 border border-surface-200 rounded-2xl p-4">
@@ -68,6 +95,7 @@ function AddRow({ onAdd }: { onAdd: (o: SetupObligation) => void }) {
           className="px-3 py-2.5 rounded-xl border border-surface-200 bg-white text-sm outline-none focus:border-primary-500"
         >
           {OBLIGATION_CATEGORIES.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+          <option value="other">Other — type your own</option>
         </select>
         <input
           type="date"
@@ -78,12 +106,27 @@ function AddRow({ onAdd }: { onAdd: (o: SetupObligation) => void }) {
           className="px-3 py-2.5 rounded-xl border border-surface-200 bg-white text-sm outline-none focus:border-primary-500"
         />
       </div>
+      {category === 'other' && (
+        <input
+          value={customCategory}
+          onChange={(e) => setCustomCategory(e.target.value)}
+          placeholder="Name the type, e.g. Church dues"
+          aria-label="Custom obligation type"
+          className="mt-2.5 w-full px-3.5 py-2.5 rounded-xl border border-surface-200 bg-white text-sm outline-none focus:border-primary-500"
+        />
+      )}
       <button
         type="button"
         disabled={!valid}
         onClick={() => {
-          onAdd({ name: name.trim(), amountInKobo: nairaToKobo(value), frequency, category, nextDueDate: dueDate ? new Date(dueDate).toISOString() : undefined });
-          setName(''); setAmount(''); setDueDate('');
+          onAdd({
+            name: name.trim(),
+            amountInKobo: nairaToKobo(value),
+            frequency,
+            category: category === 'other' ? slugify(custom) : category,
+            nextDueDate: dueDate ? new Date(dueDate).toISOString() : undefined,
+          });
+          setName(''); setAmount(''); setDueDate(''); setCustomCategory('');
         }}
         className="mt-3 w-full py-2.5 rounded-xl bg-navy-900 text-white text-sm font-semibold disabled:opacity-40 flex items-center justify-center gap-1.5"
       >
@@ -99,7 +142,10 @@ export default function SetupPage() {
 
   const [step, setStep] = useState(0);
   const [frequency, setFrequency] = useState<User['incomeFrequency']>(user?.incomeFrequency || 'monthly');
-  const [income, setIncome] = useState(user?.typicalIncomeInKobo ? String(user.typicalIncomeInKobo) : '');
+  const [income, setIncome] = useState(user?.typicalIncomeInKobo ? String(koboToNaira(user.typicalIncomeInKobo)) : '');
+  const [lastDate, setLastDate] = useState(() => user?.nextIncomeDate
+    ? subtractCycleDays(user.nextIncomeDate.slice(0, 10), user.incomeFrequency || 'monthly')
+    : '');
   const [nextDate, setNextDate] = useState(user?.nextIncomeDate ? user.nextIncomeDate.slice(0, 10) : '');
   const [preset, setPreset] = useState<SplitPreset>('balanced');
   const [obligations, setObligations] = useState<SetupObligation[]>(() => existingObligations.map(o => ({
@@ -110,6 +156,13 @@ export default function SetupPage() {
   const incomeValue = Number(income.replace(/[^\d.]/g, '')) || 0;
   const incomeError = income !== '' && incomeValue <= 0 ? 'Enter an amount above zero' : undefined;
   const canLeaveStep0 = incomeValue > 0 && !incomeError;
+
+  // The cadence decides the next money date; the field below still stays editable.
+  useEffect(() => {
+    if (!lastDate) return;
+    const derived = addCycleDays(lastDate, frequency);
+    if (derived) setNextDate(derived);
+  }, [lastDate, frequency]);
 
   const plan = useMemo(
     () => buildStarterPlan({
@@ -206,8 +259,22 @@ export default function SetupPage() {
                 </p>
               )}
 
+              <label className="block text-[13px] font-medium text-navy-800 mb-1.5 mt-4" htmlFor="setup-last-date">
+                When did money last reach you? <span className="text-surface-500 font-normal">(optional)</span>
+              </label>
+              <input
+                id="setup-last-date"
+                type="date"
+                value={lastDate}
+                max={todayISO()}
+                onChange={(e) => setLastDate(e.target.value)}
+                className="w-full px-3.5 py-3 rounded-xl border border-surface-200 bg-white text-sm outline-none focus:border-primary-500"
+              />
+
               <label className="block text-[13px] font-medium text-navy-800 mb-1.5 mt-4" htmlFor="setup-date">
-                Next money date <span className="text-surface-500 font-normal">(optional)</span>
+                Next money date {lastDate && CADENCE_DAYS[frequency]
+                  ? <span className="text-surface-500 font-normal">(worked out from your {frequency} cadence)</span>
+                  : <span className="text-surface-500 font-normal">(optional)</span>}
               </label>
               <input
                 id="setup-date"
@@ -218,7 +285,9 @@ export default function SetupPage() {
                 className="w-full px-3.5 py-3 rounded-xl border border-surface-200 bg-white text-sm outline-none focus:border-primary-500"
               />
               <p className="text-[11px] text-surface-500 mt-2">
-                With a date, daily safe-to-spend is exact. Without it, Allawii estimates a 30-day cycle and marks the number as an estimate.
+                {frequency === 'irregular'
+                  ? 'Irregular income has no fixed step, so set the next date yourself and update it when money lands.'
+                  : 'With a date, daily safe-to-spend is exact and every later payment lands one cycle after the last. Without it, Allawii estimates the cycle and marks the number as an estimate.'}
               </p>
 
               <button

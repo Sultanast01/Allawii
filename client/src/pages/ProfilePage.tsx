@@ -2,50 +2,118 @@ import { useEffect, useState } from 'react';
 import { useStore } from '../context/store';
 import { useNavigate } from 'react-router-dom';
 import Header from '../components/Header';
-import { apiGet, apiPut } from '../services/api';
+import { apiGet, apiPut, telegramBot } from '../services/api';
 import { formatNaira } from '../utils';
-import { LogOut, ChevronRight, MessageCircle, ShieldAlert, Users, Wallet, CalendarDays, Tag, BookOpen, Download, Trash2, Type, ListChecks, HelpCircle, RefreshCw } from 'lucide-react';
+import { LogOut, ChevronRight, ShieldAlert, Users, Wallet, CalendarDays, Tag, BookOpen, Trash2, Type, ListChecks, HelpCircle, RefreshCw, Send } from 'lucide-react';
 
 interface BotStatus {
-  webhookConfigured: boolean;
-  sendingConfigured: boolean;
-  linkedPhone: string | null;
-  ready: boolean;
+  botRunning: boolean;
+  botUsername: string | null;
+  linked: boolean;
+  linkedChatId: string | null;
+  activeCode: string | null;
+  codeExpiresAt: string | null;
 }
 
-const BOT_COMMANDS = [
-  { command: 'balance', note: 'what you have left' },
-  { command: 'spend 850 for data', note: 'record an expense' },
-  { command: 'received 60000 allowance', note: 'record income' },
-  { command: 'goals', note: 'savings goal progress' },
-  { command: 'insights', note: 'where your money is going' },
-  { command: 'undo', note: 'remove the last thing recorded' },
+/** Codes live 15 minutes; renewing a minute early means the tap never carries a dying code. */
+const RENEW_BEFORE_MS = 60_000;
+const CODE_TTL_LABEL = '15 minutes';
+
+const BOT_EXAMPLES = [
+  { say: 'I spent 1500 on lunch', note: 'record an expense' },
+  { say: 'save 2000', note: 'contribute to your goal' },
+  { say: "What's my balance?", note: 'what you have left' },
+  { say: 'What is my safe spend today?', note: "today's spending guide" },
+  { say: 'How are my budgets?', note: 'spend vs limit by category' },
+  { say: 'can I afford 6000?', note: 'check it against your safe amount' },
 ];
 
 export default function ProfilePage() {
   const navigate = useNavigate();
   const { user, isDemoMode, logout, resetAll, textScale, setTextScale, savingsGoals, transactions, setUser } = useStore();
   const [botStatus, setBotStatus] = useState<BotStatus | null>(null);
+  const [linkCode, setLinkCode] = useState<string | null>(null);
+  const [codeExpiresAt, setCodeExpiresAt] = useState<string | null>(null);
+  const [codePending, setCodePending] = useState(false);
+  const [now, setNow] = useState(() => Date.now());
   const [phoneDraft, setPhoneDraft] = useState('');
   const [phonePending, setPhonePending] = useState(false);
   const [phoneError, setPhoneError] = useState<string | null>(null);
   const [phoneSaved, setPhoneSaved] = useState(false);
 
-  const loadBotStatus = async () => {
+  const loadBotStatus = async (): Promise<BotStatus | null> => {
     try {
-      const data = await apiGet('/whatsapp/status');
-      setBotStatus({
-        webhookConfigured: Boolean(data.webhookConfigured),
-        sendingConfigured: Boolean(data.sendingConfigured),
-        linkedPhone: data.linkedPhone || null,
-        ready: Boolean(data.ready),
-      });
+      const data = await apiGet('/bot/user/status');
+      const status: BotStatus = {
+        botRunning: Boolean(data.botRunning),
+        botUsername: data.botUsername || null,
+        linked: Boolean(data.linked),
+        linkedChatId: data.linkedChatId || null,
+        activeCode: data.activeCode || null,
+        codeExpiresAt: data.codeExpiresAt || null,
+      };
+      setBotStatus(status);
+      // The server owns whether a code is still live, so a redeemed or expired one stops showing here.
+      if (!status.activeCode) {
+        setLinkCode(null);
+        setCodeExpiresAt(null);
+      }
+      return status;
     } catch {
       setBotStatus(null);
+      return null;
     }
   };
 
-  useEffect(() => { void loadBotStatus(); }, []);
+  const generateCode = async () => {
+    setCodePending(true);
+    try {
+      const data = await telegramBot.newLinkCode();
+      setLinkCode(data.code);
+      setCodeExpiresAt(data.expiresAt || null);
+      await loadBotStatus();
+    } catch {
+      setLinkCode(null);
+      setCodeExpiresAt(null);
+    } finally {
+      setCodePending(false);
+    }
+  };
+
+  const activeCode = linkCode || botStatus?.activeCode || null;
+  const codeExpiry = codeExpiresAt || botStatus?.codeExpiresAt || null;
+  const minutesLeft = activeCode && codeExpiry
+    ? Math.max(0, Math.round((Date.parse(codeExpiry) - now) / 60_000))
+    : null;
+  const telegramUrl = botStatus?.botUsername && activeCode
+    ? `https://t.me/${botStatus.botUsername}?start=link_${activeCode}`
+    : null;
+
+  // A code that lapses while this screen is still open sends the user into Telegram with a dead link,
+  // so the clock is kept here and the code is replaced before it expires.
+  useEffect(() => {
+    const ticker = setInterval(() => setNow(Date.now()), 10_000);
+    return () => clearInterval(ticker);
+  }, []);
+
+  useEffect(() => {
+    if (!botStatus?.botRunning || botStatus.linked || codePending) return;
+    if (!activeCode) { void generateCode(); return; }
+    if (minutesLeft !== null && minutesLeft * 60_000 < RENEW_BEFORE_MS) void generateCode();
+  }, [now, botStatus, activeCode, minutesLeft, codePending]);
+
+  // The link itself is minted by the freshness effect above once the status has loaded.
+  useEffect(() => {
+    void loadBotStatus();
+    // Tapping the link leaves this tab for Telegram; coming back should show the new state.
+    const onFocus = () => { void loadBotStatus(); };
+    document.addEventListener('visibilitychange', onFocus);
+    window.addEventListener('focus', onFocus);
+    return () => {
+      document.removeEventListener('visibilitychange', onFocus);
+      window.removeEventListener('focus', onFocus);
+    };
+  }, []);
 
   const savePhone = async () => {
     setPhonePending(true);
@@ -56,7 +124,6 @@ export default function ProfilePage() {
       if (user) setUser({ ...user, phoneNumber: result.phoneNumber });
       setPhoneDraft('');
       setPhoneSaved(true);
-      await loadBotStatus();
     } catch (error) {
       setPhoneError((error as Error).message);
     } finally {
@@ -65,12 +132,6 @@ export default function ProfilePage() {
   };
 
   const totalSaved = savingsGoals.reduce((s, g) => s + g.currentAmountInKobo, 0);
-
-  const missing: string[] = [
-    !botStatus?.linkedPhone && 'a linked WhatsApp number',
-    !botStatus?.webhookConfigured && 'the webhook keys (WHATSAPP_APP_SECRET, WHATSAPP_VERIFY_TOKEN)',
-    !botStatus?.sendingConfigured && 'the send keys (WHATSAPP_TOKEN, WHATSAPP_PHONE_NUMBER_ID)',
-  ].filter(Boolean) as string[];
 
   const menu = [
     // A real account can rebuild its plan; the demo persona's figures are pinned.
@@ -84,17 +145,9 @@ export default function ProfilePage() {
     { label: 'Help & support', desc: 'FAQs & feedback', icon: HelpCircle, path: '/help', tint: 'bg-surface-100 text-surface-600' },
   ];
 
-  const exportData = () => {
-    const blob = new Blob([JSON.stringify({ user, transactions, savingsGoals }, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = 'allowii-data.json'; a.click();
-    URL.revokeObjectURL(url);
-  };
-
   return (
     <div>
-      <Header title="Profile" showBack />
+      <Header title="Profile" />
 
       <div className="px-5 pt-5 space-y-5 lg:px-10 lg:pt-10 lg:grid lg:grid-cols-2 lg:gap-8 lg:space-y-0">
         {/* Identity */}
@@ -148,58 +201,106 @@ export default function ProfilePage() {
           </div>
         </div>
 
-        {/* WhatsApp assistant */}
+        {/* Telegram assistant */}
         <div className="card p-5">
           <div className="flex items-start gap-3 mb-4">
-            <div className="w-10 h-10 bg-emerald-50 rounded-xl flex items-center justify-center shrink-0"><MessageCircle size={18} className="text-emerald-700" /></div>
+            <div className="w-10 h-10 bg-sky-50 rounded-xl flex items-center justify-center shrink-0"><Send size={18} className="text-sky-600" /></div>
             <div className="flex-1">
-              <p className="font-bold text-navy-900 text-sm">WhatsApp assistant</p>
-              <p className="text-xs text-surface-500">Text your number from WhatsApp to check balance, record spend, see goals and get insights.</p>
+              <p className="font-bold text-navy-900 text-sm">Telegram assistant</p>
+              <p className="text-xs text-surface-500">Message the bot from Telegram to check balance, record spend, see goals and budgets.</p>
             </div>
-            <button onClick={() => void loadBotStatus()} aria-label="Refresh WhatsApp assistant status" className="p-2 -m-2 text-surface-500 hover:text-navy-900 cursor-pointer"><RefreshCw size={15} /></button>
+            <button onClick={() => void loadBotStatus()} aria-label="Refresh Telegram assistant status" className="p-2 -m-2 text-surface-500 hover:text-navy-900 cursor-pointer"><RefreshCw size={15} /></button>
           </div>
 
           <div className="flex flex-wrap items-center gap-2 mb-4">
-            {botStatus?.ready ? (
+            {botStatus?.linked && botStatus?.botRunning ? (
               <span className="badge badge-success">Live</span>
             ) : (
               <span className="badge badge-info">Set up needed</span>
             )}
-            <p className="text-xs text-surface-600">
-              Linked number: <span className="font-semibold text-navy-900">{botStatus?.linkedPhone || 'none'}</span>
-            </p>
+            {botStatus?.botUsername && (
+              <p className="text-xs text-surface-600">
+                Bot: <span className="font-semibold text-navy-900">@{botStatus.botUsername}</span>
+              </p>
+            )}
           </div>
 
-          {!botStatus?.ready && (
+          {botStatus && !botStatus.botRunning && (
             <p className="text-[11px] text-surface-500 bg-surface-50 rounded-xl p-3 mb-4">
-              {botStatus
-                ? `Not reachable from WhatsApp yet — this server is missing ${missing.join(' and ')}. Commands that do arrive are answered in the server console instead.`
-                : 'Checking the connection…'}
+              The Telegram assistant is offline — this server needs TELEGRAM_BOT_TOKEN.
             </p>
           )}
 
+          {(activeCode || (botStatus && !botStatus.linked && botStatus.botRunning)) && (
+            <div className="bg-sky-50 rounded-xl p-3 mb-3">
+              {activeCode ? (
+                <>
+                  <p className="text-xs text-surface-600 mb-1">
+                    Your personal link code
+                    {minutesLeft !== null ? ` · valid for about ${minutesLeft} more min${minutesLeft === 1 ? '' : 's'}` : ` (expires in ${CODE_TTL_LABEL})`}
+                    :
+                  </p>
+                  <p className="text-2xl font-bold tracking-widest text-navy-900 mb-2">{activeCode}</p>
+                  {telegramUrl ? (
+                    <a
+                      href={telegramUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="flex items-center justify-center gap-2 w-full py-2.5 rounded-xl bg-sky-600 text-white text-sm font-semibold"
+                    >
+                      <Send size={15} /> Open @{botStatus?.botUsername} in Telegram
+                    </a>
+                  ) : (
+                    <p className="text-[11px] text-surface-600">
+                      Open Telegram and message @{botStatus?.botUsername || 'the Allawii bot'}, then send:
+                      <code className="block mt-1 text-xs font-semibold text-navy-900 bg-white rounded-lg px-2 py-1">/link {activeCode}</code>
+                    </p>
+                  )}
+                  <p className="text-[11px] text-surface-500 mt-2">
+                    Tapping the button starts the chat with this code already attached, so the bot links your account as soon as it opens.
+                    {codePending ? ' Getting a fresh code…' : ' This screen mints a new code before the old one can expire.'}
+                  </p>
+                </>
+              ) : (
+                <p className="text-[11px] text-surface-600">Link your Telegram once below — then just talk to the bot in plain English.</p>
+              )}
+            </div>
+          )}
+
+          <button
+            onClick={() => void generateCode()}
+            disabled={codePending || !botStatus?.botRunning}
+            className="w-full mb-4 py-2.5 rounded-xl bg-navy-900 text-white text-sm font-semibold disabled:opacity-40 cursor-pointer"
+          >
+            {codePending ? 'Generating…' : botStatus?.linked ? 'Get a new link code' : 'Generate link code'}
+          </button>
+
+          {botStatus?.linked && (
+            <p className="text-[11px] text-emerald-700 mb-4">Linked — ask the bot about your money any time.</p>
+          )}
+
           <div className="space-y-2 mb-4">
-            {BOT_COMMANDS.map(({ command, note }) => (
-              <div key={command} className="flex items-center gap-3">
-                <code className="text-[11px] font-semibold text-emerald-800 bg-emerald-50 rounded-lg px-2 py-1 shrink-0">{command}</code>
+            {BOT_EXAMPLES.map(({ say, note }) => (
+              <div key={say} className="flex items-center gap-3">
+                <code className="text-[11px] font-semibold text-sky-800 bg-sky-50 rounded-lg px-2 py-1 shrink-0">{say}</code>
                 <span className="text-[11px] text-surface-500">{note}</span>
               </div>
             ))}
           </div>
 
           <div className="pt-4 border-t border-surface-100">
-            <label htmlFor="wa-phone" className="block text-xs font-semibold text-navy-900 mb-1.5">
-              WhatsApp number on your account
+            <label htmlFor="profile-phone" className="block text-xs font-semibold text-navy-900 mb-1.5">
+              Phone number on your account
             </label>
             <div className="flex gap-2">
               <input
-                id="wa-phone"
+                id="profile-phone"
                 type="tel"
                 inputMode="tel"
                 autoComplete="tel"
                 value={phoneDraft}
                 onChange={e => { setPhoneDraft(e.target.value); setPhoneError(null); setPhoneSaved(false); }}
-                placeholder={botStatus?.linkedPhone || '08012345678'}
+                placeholder={user?.phoneNumber || '08012345678'}
                 className="flex-1 min-w-0 px-3 py-2.5 rounded-xl border border-surface-200 text-sm focus:border-navy-700 focus:outline-none"
               />
               <button
@@ -207,14 +308,14 @@ export default function ProfilePage() {
                 disabled={phonePending || !phoneDraft.trim()}
                 className="px-4 py-2.5 rounded-xl bg-navy-900 text-white text-sm font-semibold disabled:opacity-40 cursor-pointer"
               >
-                {phonePending ? 'Saving…' : 'Link'}
+                {phonePending ? 'Saving…' : 'Save'}
               </button>
             </div>
             <p className="text-[11px] text-surface-500 mt-2">
-              Use the same number you sign in with, so the assistant can find your ledger.
+              Used for your B Moni sandbox wallet — not needed for the Telegram bot.
             </p>
             {phoneError && <p role="alert" className="text-[11px] text-red-600 mt-1.5">{phoneError}</p>}
-            {phoneSaved && <p className="text-[11px] text-emerald-700 mt-1.5">Number linked.</p>}
+            {phoneSaved && <p className="text-[11px] text-emerald-700 mt-1.5">Number saved.</p>}
           </div>
         </div>
 
@@ -234,9 +335,6 @@ export default function ProfilePage() {
 
         {/* Data */}
         <div className="card divide-y divide-surface-100">
-          <button onClick={exportData} className="flex items-center gap-3 p-4 w-full text-left hover:bg-surface-50">
-            <Download size={18} className="text-surface-500" /><span className="text-sm font-semibold text-navy-900">Export my data</span>
-          </button>
           <button onClick={() => { if (confirm('Delete all Allawii data on this device?')) { resetAll(); navigate('/'); } }} className="flex items-center gap-3 p-4 w-full text-left hover:bg-red-50">
             <Trash2 size={18} className="text-red-500" /><span className="text-sm font-semibold text-red-600">Delete my data</span>
           </button>

@@ -8,9 +8,18 @@ Built for the B Moni × TINC26 hackathon. Mobile-first, offline-first, sandbox-o
 
 ```bash
 npm run install:all   # root + client + server dependencies
-cp server/.env.example server/.env   # then set BMONI_API_KEY to your sandbox key
-npm run dev
+cp server/.env.example server/.env   # add the Supabase keys + your BotFather token
+npm run dev                           # client :5173, server :3001, Telegram assistant in-process
+node server/e2e-supabase.mjs          # 23 checks against the live Supabase project
 ```
+
+The `e2e-supabase.mjs` run needs `BOT_API_KEY` in the environment and a server listening on
+`:3001`; it registers throwaway users, exercises auth + sync + the assistant contract, and confirms
+one user can never read another's rows.
+
+The Telegram assistant runs inside the API process — `npm run dev` is the only command. On boot the
+server logs `Telegram assistant: live as @your_bot`; without `TELEGRAM_BOT_TOKEN` it logs
+`offline` and everything else keeps working. Message the bot `/start` to use it.
 
 - **Client**: http://localhost:5173
 - **Server**: http://localhost:3001 (Vite proxies `/api` → `:3001`)
@@ -32,7 +41,7 @@ The app is usable with the server switched off — only the B Moni screens need 
 | Round-Up Savings | Real accrual engine on local transactions; sweep requires deployed smart wallet (see below) |
 | Student offers | Illustrative, with a stated disclaimer |
 | AI Money Coach | Deterministic engine on local data. No external AI provider, so no personal finance data leaves the device |
-| WhatsApp assistant | Real — signed webhook, phone-to-account linking, and the same ledger the app syncs. Insights are deterministic (no LLM); replies are only *delivered* once Meta credentials are in `server/.env`, otherwise they print to the server console |
+| Telegram assistant | Real — it runs inside this server, over the same Supabase ledger the app syncs. Insights are deterministic (no LLM) |
 
 ## Features
 
@@ -59,7 +68,7 @@ The app is usable with the server switched off — only the B Moni screens need 
 - Scam safety check — flags on a pasted message, in plain language, with the rule list shown on screen
 - Financial calendar — income, dues, deadlines and goal checks on one timeline
 - Campus group contributions ledger (simulated, labelled)
-- WhatsApp assistant — text your own number from WhatsApp to check balance, record money in or out, see goals and get insights
+- Telegram assistant — message the bot to check balance, record money in or out, see goals and budgets
 
 **Streaks**
 
@@ -99,13 +108,13 @@ Mobile-first, with a real desktop shell rather than a stretched phone: at `lg` (
 | State & storage | Zustand + `persist` (localStorage, key `allowii-storage-v2`) |
 | Routing | React Router v6 |
 | Backend | Express + TypeScript (`tsx`) |
-| Storage | JSON file store (`server/data/allowii.json`) — swap for Postgres/Supabase in production |
-| Auth | JWT + bcrypt |
+| Storage | Supabase Postgres (via `server/src/models/database.ts`) |
+| Auth | Supabase Auth (email + password; sessions proxied by the backend) |
 | Financial API | B Moni Embedded API v1, sandbox |
 
 ## B Moni Integration
 
-`server/src/services/bmoni.ts` calls `https://embedded-dev.bmoni.com/v1/*` with the `x-api-key` header. The key lives only in `server/.env`; the client authenticates to Allowii's own backend with a JWT.
+`server/src/services/bmoni.ts` calls `https://embedded-dev.bmoni.com/v1/*` with the `x-api-key` header. The key lives only in `server/.env`; the client authenticates to Allawii's own backend with its Supabase session token.
 
 Live endpoints, all reachable in `GET /api/bmoni/status` and the `/bmoni` screen:
 
@@ -130,33 +139,31 @@ Browsers cannot use the `bmoni_embedded_sdk` (it needs iOS Secure Enclave / Andr
 
 The signature is always produced by the user's own browser wallet — the backend never fabricates a key or signs on the user's behalf.
 
-## WhatsApp Assistant
+## Telegram Assistant
 
-A WhatsApp Business Cloud API bot over the same ledger the app uses. Nothing about the money lives in the bot: it reads and writes the server ledger, and the browser tab syncs with it.
+The assistant is part of this server: it long-polls Telegram from the same process that serves the API and talks to the same Supabase ledger as the app, so a spend logged on Telegram is on the next app sync. Money logic lives in one place (`server/src/services/bot-gateway.ts`) and the bot only formats replies.
 
 | Piece | File | Role |
 | --- | --- | --- |
-| Intent + replies | `server/src/services/whatsapp.ts` | pure — classify text, build balance/goals/insights/help replies, resolve the linked account |
-| Transport | `server/src/services/whatsapp.cloud.ts` | signature check, payload extraction, id de-dupe, Graph API send, 4096-char clamp |
-| Routes | `server/src/routes/whatsapp.ts` | `GET /api/whatsapp/webhook` (Meta handshake), `POST` (signed inbound), `GET /api/whatsapp/status` |
+| Bot loop | `server/src/bot/index.ts` | long-polling, `/start` and `/link`, replies, inline buttons, daily budget nudges |
+| Telegram transport | `server/src/bot/telegram.ts` | `getMe`/`sendMessage`/`answerCallbackQuery`/`getUpdates` over `fetch` - no bot SDK |
+| Intent parsing | `server/src/bot/intents.ts` | "1.5k", "3 days", and what a sentence is a purchase of |
+| Money abilities | `server/src/services/bot-gateway.ts` | summary, expense, goal contribution, budget transfer, link codes - naira in, kobo stored |
+| HTTP mirror | `server/src/routes/bot.ts` | `/api/bot/*` behind `BOT_API_KEY`, for anyone who still runs the [standalone bot repo](https://github.com/Sultanast01/allawii-bot) against this server |
+| Linking | `server/src/routes/bot.ts` + Profile screen | `/api/bot/user/link-code` mints a one-time 6-digit code; the user sends `/link 123456` to the bot |
 | Ledger sync | `server/src/routes/sync.ts` + `client/src/services/sync.ts` | last-write-wins merge, tombstones, server-only rows never destroyed |
 
-Commands (natural phrasing works too — "how much do i have", "i bought data for 850"):
-
-- `balance` · `spend 850 for data` · `received 60000 allowance` · `goals` · `insights` · `undo` · `help`
-- An amount with no recognisable category returns a numbered category menu; `cancel` aborts it.
+What the bot understands: "I spent 1500 on lunch", "save 2000", "What's my balance?", "What's my safe spend today?", "How are my budgets?", "My savings goals", "can I afford 6000?"
 
 ### Turning it on
 
-1. Create a WhatsApp Business Cloud API app in the Meta developer console and keep the sandbox number.
-2. Set the webhook callback URL to `https://<your-public-host>/api/whatsapp/webhook` and the verify token to the same value as `WHATSAPP_VERIFY_TOKEN`. Meta needs HTTPS, so a local port needs a tunnel (`ngrok http 3001`).
-3. Subscribe to the `messages` field.
-4. Put the app secret, access token and phone-number id in `server/.env` (see `server/.env.example`) and restart the API. The startup line reads `WhatsApp webhook: signature checks on · outbound: Graph API`.
-5. On the site, save the same WhatsApp number in **Profile → WhatsApp assistant**. `GET /api/whatsapp/status` reports what is still missing, and the card says *Live* when the number, webhook and send credentials all line up.
+1. Create a bot with [@BotFather](https://t.me/BotFather) and keep the token.
+2. In `server/.env`: set `TELEGRAM_BOT_TOKEN`. `TELEGRAM_BOT_USERNAME` is only a placeholder - the app shows the `@username` Telegram reports for that token. `npm run dev` then starts the assistant with the API; with no token it logs `offline` and the rest of the server is unaffected.
+3. In the app: **Profile -> Telegram assistant -> Generate link code**, then send `/link <code>` to the bot. The code is single-use and expires in 15 minutes; `GET /api/bot/user/status` reports the link state and whether the assistant is live.
 
-Without `WHATSAPP_TOKEN` the bot still answers — replies print to the server console instead of being delivered, so the whole flow is testable before any Meta credentials exist. Without `WHATSAPP_APP_SECRET` the webhook returns 503 rather than accepting unsigned traffic.
+Long-polling means the server needs no public host, tunnel or webhook. Only one process may poll a token at a time - if you run the standalone bot repo against this server instead, leave `TELEGRAM_BOT_TOKEN` unset here so the in-process assistant stays offline.
 
-**Identity rule:** the inbound `wa_id` is normalised to E.164 and matched against `users.phoneNumber`. Two accounts on one number gets no reply at all, because any answer could leak the wrong ledger; an unknown number gets a "not linked yet" message that names nothing about the account.
+**Identity rule:** the bot only sees a `userId` after the user proves possession of a code minted inside their authenticated app session. Unknown codes get "did not work", expired codes get an explicit error - no ledger detail is ever named for an unlinked chat.
 
 ## Auth & Onboarding
 
@@ -164,10 +171,10 @@ Without `WHATSAPP_TOKEN` the bot still answers — replies print to the server c
 |---|---|---|
 | Welcome | `/welcome` | Choose: create an account, sign in, or enter demo |
 | Sign up | `/signup` | Name, email, university (optional), password with live strength meter, terms consent |
-| Login | `/login` | Email + password against the backend, "remember me" picks a 30-day or 8-hour JWT |
+| Login | `/login` | Email + password against Supabase Auth (through the backend); the session token lasts an hour and refreshes transparently |
 | Plan setup | `/setup` | Three steps after auth: income cycle, fixed obligations, starting split → builds the category plan |
 
-Signup and login hit `POST /api/auth/register` and `POST /api/auth/login`; the returned JWT is stored under `allowii-token` and the plan setup mirrors the profile to `PUT /api/auth/profile`. The device is still the source of truth for the plan, so if that sync fails the screen says so instead of pretending.
+Signup and login hit `POST /api/auth/register` and `POST /api/auth/login`; the backend creates and verifies the account in **Supabase Auth** (`auth.admin.createUser` with `email_confirm`, then `signInWithPassword`) and returns the Supabase session — access token, refresh token, expiry — which the client stores under `allowii-token`. Every API call sends that access token; the server checks it with `supabase.auth.getUser()`, and a 401 triggers one transparent `POST /api/auth/refresh`. The plan setup mirrors the profile to `PUT /api/auth/profile`. The device is still the source of truth for the plan, so if that sync fails the screen says so instead of pretending.
 
 Google and Apple buttons are present but disabled by design — OAuth needs credentials from a developer console that this build does not carry, and tapping them says exactly that. Password reset is likewise disclosed as unavailable rather than faked.
 
@@ -196,9 +203,11 @@ allawii/
 │   ├── types/        domain models and category config
 │   └── utils/        naira formatting, safe-to-spend math
 └── server/src/
-    ├── routes/       auth, transactions, bmoni
-    ├── services/     bmoni.ts — sandbox proxy
-    └── models/       database.ts — JSON store
+    ├── bot/          index.ts — the Telegram assistant loop; telegram.ts — Bot API over fetch
+    ├── routes/       auth, transactions, bmoni, round-up, bot (HTTP mirror), sync
+    ├── services/     bmoni.ts — sandbox proxy; sync.ts — ledger merge; bot-gateway.ts — the assistant's money abilities
+    ├── lib/          supabase.ts — service-role + anon-key clients
+    └── models/       database.ts — Supabase Postgres repository
 ```
 
 ## Environment Variables
@@ -206,100 +215,42 @@ allawii/
 ```env
 # server/.env
 BMONI_BASE_URL=https://embedded-dev.bmoni.com
-BMONI_API_KEY=<sandbox key only — never a production key, never in the client>
-JWT_SECRET=<random secret>
+# B Moni partner key — the shared sandbox key from B Moni's API reference.
+# Sandbox-only, dev base URL only; never a production key, never in the client.
+BMONI_API_KEY=pk_a025cacbf33a_76fb864113f3540909de5b1da39cc146906e35b1c6d4d1e4
 PORT=3001
 
-# WhatsApp Business Cloud API — optional, see "WhatsApp Assistant"
-WHATSAPP_APP_SECRET=<the app's App Secret; webhook returns 503 without it>
-WHATSAPP_VERIFY_TOKEN=<the same string you type into Meta's console>
-WHATSAPP_TOKEN=<temporary or permanent access token>
-WHATSAPP_PHONE_NUMBER_ID=<the sandbox number id>
-WHATSAPP_GRAPH_VERSION=v23.0
+# Supabase (Project Settings → API)
+SUPABASE_URL=https://<project-ref>.supabase.co
+SUPABASE_ANON_KEY=<anon public key — used for sign-in and token verification>
+SUPABASE_SERVICE_ROLE_KEY=<service role secret — server-side only, bypasses RLS>
+
+# Telegram assistant (see "Telegram Assistant")
+TELEGRAM_BOT_TOKEN=<BotFather token — the assistant runs in this process>
+TELEGRAM_BOT_USERNAME=<optional placeholder; the app shows the username Telegram reports>
+BOT_API_KEY=<long random string, only for the /api/bot/* HTTP mirror>
+DEMO_PASSWORD=<password for the auto-seeded demo persona>
 ```
 
 `server/.env` is git-ignored. Production credentials are not supported by this build.
 
-## Moving the backend to Supabase
+## Supabase Backend
 
-The app is already structured for this: the client talks to one backend (`client/src/services/api.ts` → `/api/*`), the B Moni key lives only on the server, and the whole plan also lives on-device via Zustand `persist`. Supabase replaces the account, the JWT and the JSON file — it does **not** replace the B Moni proxy.
+The Express server is the only gateway to Supabase: accounts live in `auth.users`, all app data lives in Postgres tables reached through the service-role client (`server/src/lib/supabase.ts`), and every table has RLS enabled with **no policies** - the anon key can read nothing, and the service-role key never leaves the server. The B Moni proxy is unchanged: the partner key still only exists server-side.
 
-1. **Create the project** in the Supabase dashboard, then note the Project URL and the `anon` public key. Generate a service-role key only if you keep writes on the Express server — it must never be prefixed `VITE_`.
-2. **Install** `@supabase/supabase-js` in `client/` (direct-from-browser mode) or in `server/` (proxy mode), not both.
-3. **Schema** — run this in the SQL editor:
+Schema (applied as the `init` migration; source of truth in `server/supabase/schema.sql`):
 
-```sql
-create table profiles (
-  id uuid primary key references auth.users on delete cascade,
-  name text not null, email text unique not null,
-  school text, income_frequency text check (income_frequency in ('weekly','biweekly','monthly')),
-  typical_income numeric(12,2) default 0, next_income_date date,
-  text_scale numeric(3,2) default 1, inflation_rate integer default 15,
-  created_at timestamptz default now()
-);
-create table transactions (
-  id uuid primary key default gen_random_uuid(),
-  user_id uuid not null references auth.users on delete cascade,
-  type text not null check (type in ('income','expense','transfer')),
-  amount numeric(12,2) not null check (amount > 0),
-  category text not null, description text not null,
-  occurred_at timestamptz not null, merchant text, payment_method text,
-  budget_bucket text not null check (budget_bucket in ('obligations','essentials','future_you','enjoyment')),
-  source text not null default 'manual', receipt_url text, notes text,
-  created_at timestamptz default now()
-);
-create table savings_goals (
-  id uuid primary key default gen_random_uuid(),
-  user_id uuid not null references auth.users on delete cascade,
-  name text not null, target_amount numeric(12,2) not null, current_amount numeric(12,2) not null default 0,
-  target_date date, contribution_per_cycle numeric(12,2) not null,
-  contribution_frequency text not null check (contribution_frequency in ('daily','weekly','monthly')),
-  is_paused boolean not null default false, created_at timestamptz default now()
-);
--- The streak is derived, so store the events it is computed from, never the count.
-create table goal_contributions (
-  id uuid primary key default gen_random_uuid(),
-  user_id uuid not null references auth.users on delete cascade,
-  goal_id uuid not null references savings_goals on delete cascade,
-  amount numeric(12,2) not null check (amount > 0),
-  contributed_on date not null default (now() at time zone 'utc')::date,
-  created_at timestamptz default now()
-);
-create table obligations (
-  id uuid primary key default gen_random_uuid(),
-  user_id uuid not null references auth.users on delete cascade,
-  name text not null, amount numeric(12,2) not null, frequency text not null,
-  category text not null, due_day integer, next_due_date date
-);
-create table calendar_events (
-  id uuid primary key default gen_random_uuid(),
-  user_id uuid not null references auth.users on delete cascade,
-  title text not null, event_date date not null, kind text not null, amount numeric(12,2), notes text
-);
-create table bmoni_accounts (
-  user_id uuid primary key references auth.users on delete cascade,
-  bmoni_user_id text, wallet_id text, status text, created_at timestamptz default now()
-);
-create index on transactions (user_id, occurred_at desc);
-create index on goal_contributions (user_id, contributed_on);
-```
+| Table | Carries |
+| --- | --- |
+| `profiles` | name, email, university, phone, income cycle, bot link code, streak dates - id references `auth.users` |
+| `transactions` | the ledger; amounts in kobo, dates as ISO text, `source` includes `telegram` |
+| `savings_goals` | goals with `contribution_dates` for the streak |
+| `budget_plans` | the app's category split, mirrored on sync so the bot can report spend vs limit |
+| `bmoni_accounts` | sandbox identity per user (owner-readable only) |
+| `round_up_settings` / `round_up_ledger` | round-up engine state |
+| `bot_links` | Telegram `chat_id` -> `user_id` after a code link |
 
-4. **Row Level Security** — this is the whole point of moving. Enable it and add one policy per table, substituting the table name:
-
-```sql
-alter table transactions enable row level security;
-create policy "own rows" on transactions for all
-  using (auth.uid() = user_id) with check (auth.uid() = user_id);
-```
-
-   Repeat for `profiles`, `savings_goals`, `goal_contributions`, `obligations`, `calendar_events`, `bmoni_accounts`. Never expose a table without a policy; `bmoni_accounts` in particular should be readable only by its owner because it carries the sandbox identity.
-5. **Auth swap** — delete `bcrypt`, `jsonwebtoken`, `middleware/auth.ts` and `POST /api/auth/*`. Supabase issues and refreshes its own JWT: `supabase.auth.signUp({ email, password, options: { data: { name } } })`, `signInWithPassword`, `signOut`. The disabled Google and Apple buttons become real with `signInWithOAuth({ provider: 'google' | 'apple' })` once those providers are enabled in Authentication → Providers. Password reset becomes `resetPasswordForEmail`, which is the honest version of the "not available" copy currently on the login screen.
-6. **Env vars** — `client/.env`: `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY` (both public by design, protected by RLS). `server/.env` keeps `BMONI_API_KEY` and `JWT_SECRET` disappears; if the server writes to Supabase it needs `SUPABASE_SERVICE_ROLE_KEY`, which bypasses RLS and therefore stays server-side only.
-7. **Rewire `client/src/services/api.ts`** — replace `authedFetch('/api/transactions')` with typed Supabase queries (`from('transactions').eq('user_id', uid).order('occurred_at', { ascending: false })`). Keep the module as the only place that touches Supabase so the store's call sites do not change.
-8. **Keep the B Moni proxy on Express** — `server/src/routes/bmoni.ts` must stay. The partner key cannot go in the browser, so the client calls the server for B Moni and Supabase for data. Verify in the Network tab that no request from the bundle carries `x-api-key`.
-9. **Decide the source of truth** — recommended: device-first. Keep Zustand `persist` as the working copy, write through to Supabase, and reuse the existing `syncStatus` column (`'synced' | 'pending' | 'failed'`) as the retry queue. On sign-in, merge by `occurred_at`/`created_at` per id, newest wins. Streaks need no migration work: `readStreak()` already recomputes everything from the contribution dates, so a device that has been offline for a week self-corrects on first load.
-10. **Migrate existing rows** — the local JSON store is one file: read `server/data/allowii.json`, map `userId` to the new `auth.uid()` for that email, insert. Do it once, from a script, with the service-role key, then delete the script.
-11. **Test before trusting it** — sign in as user A and try to read user B's rows by id (must come back empty), check the RLS advisor in the dashboard, confirm the app still works with the network off, and confirm demo mode never touches Supabase.
+Amounts are kobo `bigint`s and timestamps are ISO `text` - the same shapes the client already stores, so rows round-trip without timezone drift. Signup auto-confirms the auth user server-side (`email_confirm: true`), so the project needs no email provider for the demo; enabling one later is a Supabase dashboard setting, not a code change.
 
 ## Safety Rules Held Throughout
 

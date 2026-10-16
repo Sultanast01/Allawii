@@ -134,7 +134,7 @@ export default function StatisticsPage() {
 
   return (
     <div>
-      <Header title="Statistics" showBack />
+      <Header title="Statistics" />
 
       <div className="px-5 pt-5 pb-8 space-y-5 lg:px-10 lg:pt-10">
         <div>

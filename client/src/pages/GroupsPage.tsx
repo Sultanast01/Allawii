@@ -10,7 +10,7 @@ export default function GroupsPage() {
 
   return (
     <div>
-      <Header title="Group Contributions" showBack />
+      <Header title="Group Contributions" />
 
       <div className="px-5 pt-5 pb-8 space-y-4 lg:px-10 lg:grid lg:grid-cols-2 lg:gap-8 lg:space-y-0 lg:content-start">
         <div className="lg:col-span-2">

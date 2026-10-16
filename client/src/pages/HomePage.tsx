@@ -1,5 +1,5 @@
 import { useNavigate } from 'react-router-dom';
-import { useStore } from '../context/store';
+import { useStore, spentInCycleInKobo } from '../context/store';
 import Header from '../components/Header';
 import BMoniCard from '../components/BMoniCard';
 import { formatNaira, formatNairaShort, daysUntil, getRelativeTime, getCategoryIcon } from '../utils';
@@ -24,7 +24,7 @@ export default function HomePage() {
   const streakView = getStreak();
   const allowance = getMonthlyAllowance();
   const balance = getTotalBalance();
-  const spent = transactions.filter(t => t.type === 'expense').reduce((s, t) => s + t.amountInKobo, 0);
+  const spent = spentInCycleInKobo(transactions, user);
   const reserved = savingsGoals.filter(g => !g.isPaused).reduce((s, g) => s + g.contributionPerCycleInKobo, 0);
   const daysLeft = user?.nextIncomeDate ? daysUntil(user.nextIncomeDate) : 0;
   const nextIncomeLabel = user?.nextIncomeDate

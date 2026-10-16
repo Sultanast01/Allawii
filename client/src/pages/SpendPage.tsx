@@ -2,89 +2,40 @@ import { useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useStore } from '../context/store';
 import Header from '../components/Header';
-import { formatNaira, getRelativeTime, getCategoryIcon, nairaToKobo } from '../utils';
+import { formatNaira, getRelativeTime, getCategoryIcon, getBucketLabel, nairaToKobo } from '../utils';
+import { parseStatement, type ParsedRow } from '../utils/parsing';
 import { DEFAULT_CATEGORIES } from '../types';
-import type { CategoryConfig } from '../types';
-import { Plus, Search, Upload, ArrowLeftRight, X, Check, BarChart3, Wallet, ChevronRight } from 'lucide-react';
+import type { Transaction } from '../types';
+import { Plus, Search, Upload, ArrowLeftRight, X, Check, BarChart3, Wallet, ChevronRight, ChevronDown } from 'lucide-react';
 
-interface ParsedRow {
-  date: string;
-  description: string;
-  amount: number;
-  type: 'income' | 'expense';
-  category: CategoryConfig;
-  duplicate: boolean;
+/** `2026-10` for a date — the key a history month filter uses. */
+function monthKey(dateString: string): string {
+  const at = new Date(dateString);
+  if (Number.isNaN(at.getTime())) return '';
+  return `${at.getFullYear()}-${String(at.getMonth() + 1).padStart(2, '0')}`;
 }
 
-const KEYWORDS: [RegExp, string][] = [
-  [/fuel|petrol|bus|taxi|keke|okada|uber|bolt|transport|trip/i, 'transport'],
-  [/data|airtime|mtn|glo\b|airtel|9mobile|recharge|subscri|netflix|spotify|youtube/i, 'data_airtime'],
-  [/rent|lease/i, 'rent'],
-  [/school|fees|tuition|dues|department/i, 'school_fees'],
-  [/book|print|photocopy|binding|lecture|lab coat|stationery/i, 'academics'],
-  [/food|meal|grocer|rice|beans|market|eat|restaur|catering|provision/i, 'food'],
-  [/loan|debt|repay|owe|payback/i, 'debt'],
-  [/family|parents|home support|mummy|daddy/i, 'family'],
-  [/game|gaming|casino|bets|entertain/i, 'entertainment'],
-  [/shop|cloth|shoe|store|mall/i, 'shopping'],
-  [/light|elec|neon|power|gen|fuel gen/i, 'utilities'],
-];
-
-function suggestCategory(description: string): CategoryConfig {
-  const id = KEYWORDS.find(([re]) => re.test(description))?.[1];
-  return DEFAULT_CATEGORIES.find(c => c.id === id) || DEFAULT_CATEGORIES.find(c => c.id === 'food')!;
+function monthLabel(key: string): string {
+  const [year, month] = key.split('-').map(Number);
+  return new Date(year, (month || 1) - 1, 1).toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
 }
 
-function splitLine(line: string): string[] {
-  const out: string[] = [];
-  let cur = '';
-  let quoted = false;
-  for (const ch of line) {
-    if (ch === '"') quoted = !quoted;
-    else if (ch === ',' && !quoted) { out.push(cur.trim()); cur = ''; }
-    else cur += ch;
-  }
-  out.push(cur.trim());
-  return out.map(c => c.replace(/^"|"$/g, ''));
-}
-
-/** Accepts `date,description,amount` with or without a header row; a negative amount is an expense. */
-export function parseStatement(text: string, existing: { date: string; description: string; amountInKobo: number }[]): ParsedRow[] {
-  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
-  const body = lines.filter(l => {
-    const cells = splitLine(l);
-    const hasNumber = cells.some(c => /[\d.]{3,}/.test(c));
-    const looksHeader = /date|amount|description|narration|details/i.test(l) && !hasNumber;
-    return !looksHeader;
-  });
-
-  return body.map(line => {
-    const cells = splitLine(line);
-    const rawDate = cells[0] || '';
-    const description = cells.find((c, i) => i > 0 && isNaN(Number(c.replace(/[,\s]/g, '')))) || rawDate;
-    const amountCell = [...cells].reverse().find(c => /-?[\d,]*\.?\d+/.test(c)) || '0';
-    const amount = Math.abs(Number(amountCell.replace(/[₦,\s]/g, ''))) || 0;
-    const parsed = new Date(rawDate);
-    const date = isNaN(parsed.getTime()) ? new Date().toISOString() : parsed.toISOString();
-    const credit = /^[+]/.test(amountCell) || /credit|cr\b|paid in|salary|allowance|received|refund/i.test(line);
-    const category = suggestCategory(description);
-    const type: ParsedRow['type'] = credit ? 'income' : 'expense';
-    return {
-      date,
-      description: description || 'Imported entry',
-      amount,
-      type,
-      category,
-      duplicate: existing.some(t => t.amountInKobo === nairaToKobo(amount) && t.description.toLowerCase() === description.toLowerCase()),
-    };
-  }).filter(r => r.amount > 0);
-}
+const SOURCE_LABELS: Record<string, string> = {
+  manual: 'Added by you',
+  csv: 'CSV import',
+  receipt: 'Receipt scan',
+  bmoni: 'B Moni wallet',
+  telegram: 'Telegram bot',
+};
 
 export default function SpendPage() {
   const navigate = useNavigate();
   const { transactions, deleteTransaction, addTransaction, categoryBudgets, getMonthlyAllowance } = useStore();
   const [search, setSearch] = useState('');
   const [filterType, setFilterType] = useState('all');
+  const [filterMonth, setFilterMonth] = useState('all');
+  const [filterCategory, setFilterCategory] = useState('all');
+  const [openId, setOpenId] = useState<string | null>(null);
   const [showImport, setShowImport] = useState(false);
   const [fileName, setFileName] = useState('');
   const [rows, setRows] = useState<ParsedRow[]>([]);
@@ -95,18 +46,42 @@ export default function SpendPage() {
 
   const allowance = getMonthlyAllowance();
 
-  const filtered = transactions.filter(tx => {
-    const m = tx.description.toLowerCase().includes(search.toLowerCase()) || tx.category.toLowerCase().includes(search.toLowerCase());
-    const t = filterType === 'all' || tx.type === filterType;
-    return m && t;
-  });
+  const monthOptions = useMemo(() => {
+    const keys = [...new Set(transactions.map(t => monthKey(t.date)).filter(Boolean))];
+    return keys.sort((a, b) => b.localeCompare(a));
+  }, [transactions]);
+
+  const categoryOptions = useMemo(() => {
+    const ids = [...new Set(transactions.map(t => t.category))];
+    return ids
+      .map(id => ({ id, label: DEFAULT_CATEGORIES.find(c => c.id === id)?.name || id.replace('_', ' ') }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+  }, [transactions]);
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return transactions
+      .filter(tx => {
+        const matchesText = !q
+          || tx.description.toLowerCase().includes(q)
+          || tx.category.toLowerCase().includes(q)
+          || (tx.merchant || '').toLowerCase().includes(q);
+        const matchesType = filterType === 'all' || tx.type === filterType;
+        const matchesMonth = filterMonth === 'all' || monthKey(tx.date) === filterMonth;
+        const matchesCategory = filterCategory === 'all' || tx.category === filterCategory;
+        return matchesText && matchesType && matchesMonth && matchesCategory;
+      })
+      .sort((a, b) => Date.parse(b.date) - Date.parse(a.date));
+  }, [transactions, search, filterType, filterMonth, filterCategory]);
 
   const grouped = filtered.reduce((acc, tx) => {
     const date = new Date(tx.date).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' });
     (acc[date] ||= []).push(tx);
     return acc;
-  }, {} as Record<string, typeof transactions>);
+  }, {} as Record<string, Transaction[]>);
 
+  const shownIn = filtered.filter(t => t.type === 'income').reduce((s, t) => s + t.amountInKobo, 0);
+  const shownOut = filtered.filter(t => t.type === 'expense').reduce((s, t) => s + t.amountInKobo, 0);
   const totalIn = transactions.filter(t => t.type === 'income').reduce((s, t) => s + t.amountInKobo, 0);
   const totalOut = transactions.filter(t => t.type === 'expense').reduce((s, t) => s + t.amountInKobo, 0);
 
@@ -136,7 +111,7 @@ export default function SpendPage() {
 
   const confirmImport = () => {
     chosen.forEach(r => addTransaction({
-      userId: 'self', type: r.type, amountInKobo: nairaToKobo(r.amount), category: r.category.id,
+      userId: 'self', type: r.type, amountInKobo: Math.round(nairaToKobo(r.amount)), category: r.category.id,
       description: r.description, date: r.date, budgetBucket: r.category.bucket, source: 'csv',
     }));
     setShowImport(false); setRows([]); setFileName(''); setKept(new Set());
@@ -144,7 +119,7 @@ export default function SpendPage() {
 
   return (
     <div>
-      <Header title="Activity" showBack />
+      <Header title="Activity" />
 
       <div className="px-5 pt-5 space-y-4 lg:px-10 lg:pt-10 lg:grid lg:grid-cols-12 lg:gap-8 lg:items-start">
         {/* Budget overview - collapsible */}
@@ -158,7 +133,7 @@ export default function SpendPage() {
                 <Wallet size={18} className="text-primary-600" />
               </div>
               <div className="text-left">
-                <p className="text-sm font-semibold text-navy-900">Monthly budget</p>
+                <p className="text-sm font-semibold text-navy-900">This cycle&apos;s budget</p>
                 <p className="text-xs text-surface-500">{formatNaira(allowance)} · {categoryBudgets.length} categories</p>
               </div>
             </div>
@@ -174,17 +149,15 @@ export default function SpendPage() {
                 </button>
               </div>
               {categoryBudgets.map(cat => {
-                const spent = transactions
-                  .filter(t => t.type === 'expense' && t.category === cat.name && new Date(t.date).getMonth() === new Date().getMonth())
-                  .reduce((sum, t) => sum + t.amountInKobo, 0);
+                const spent = cat.spentInKobo;
                 const pct = Math.min(100, (spent / (cat.allocatedInKobo || 1)) * 100);
                 const isOver = spent > (cat.allocatedInKobo || 0);
                 return (
-                  <div key={cat.name}>
+                  <div key={cat.id}>
                     <div className="flex items-center justify-between text-xs mb-1">
-                      <span className="text-surface-600 capitalize">{cat.name.replace('_', ' ')}</span>
+                      <span className="text-surface-600 capitalize">{cat.name}</span>
                       <span className={isOver ? 'text-red-600 font-semibold' : 'text-surface-500'}>
-                        {formatNaira(spent)} / {formatNaira(cat.allocatedInKobo || 0)}
+                        {formatNaira(spent)} / {formatNaira(cat.allocatedInKobo)}
                       </span>
                     </div>
                     <div className="h-1.5 bg-surface-100 rounded-full overflow-hidden">
@@ -257,7 +230,7 @@ export default function SpendPage() {
         <div className="space-y-4 lg:order-1 lg:col-span-8">
           <div className="relative">
             <Search size={16} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-surface-500" />
-            <input type="text" placeholder="Search transactions..." value={search} onChange={(e) => setSearch(e.target.value)} className="input-field pl-10 py-2.5 text-sm" />
+            <input type="text" placeholder="Search descriptions, categories, merchants..." value={search} onChange={(e) => setSearch(e.target.value)} className="input-field pl-10 py-2.5 text-sm" />
           </div>
           <div className="flex gap-2">
             {['all', 'income', 'expense'].map(t => (
@@ -266,14 +239,42 @@ export default function SpendPage() {
               }`}>{t}</button>
             ))}
           </div>
+          {transactions.length > 0 && (
+            <div className="grid grid-cols-2 gap-2">
+              <select value={filterMonth} onChange={(e) => setFilterMonth(e.target.value)} aria-label="Filter by month" className="input-field text-sm py-2">
+                <option value="all">All months</option>
+                {monthOptions.map(key => <option key={key} value={key}>{monthLabel(key)}</option>)}
+              </select>
+              <select value={filterCategory} onChange={(e) => setFilterCategory(e.target.value)} aria-label="Filter by category" className="input-field text-sm py-2">
+                <option value="all">All categories</option>
+                {categoryOptions.map(c => <option key={c.id} value={c.id}>{c.label}</option>)}
+              </select>
+            </div>
+          )}
+          {transactions.length > 0 && (
+            <p className="text-xs text-surface-500">
+              Showing {filtered.length} of {transactions.length} entries ·{' '}
+              <span className="text-emerald-700 font-semibold">{formatNaira(shownIn)} in</span> ·{' '}
+              <span className="text-navy-900 font-semibold">{formatNaira(shownOut)} out</span>
+              {(filterMonth !== 'all' || filterCategory !== 'all' || filterType !== 'all' || search) && (
+                <button onClick={() => { setFilterMonth('all'); setFilterCategory('all'); setFilterType('all'); setSearch(''); }} className="ml-2 font-semibold text-primary-600">
+                  Clear filters
+                </button>
+              )}
+            </p>
+          )}
 
           {Object.keys(grouped).length === 0 ? (
             <div className="card p-10 text-center mt-6">
               <div className="w-14 h-14 bg-primary-50 rounded-2xl flex items-center justify-center mx-auto mb-4">
                 <ArrowLeftRight size={24} className="text-primary-600" />
               </div>
-              <h3 className="font-bold text-navy-900 text-lg mb-1">No transactions match</h3>
-              <p className="text-sm text-surface-500 mb-4">Clear the search, switch the filter, or record your first expense.</p>
+              <h3 className="font-bold text-navy-900 text-lg mb-1">{transactions.length === 0 ? 'No history yet' : 'No transactions match'}</h3>
+              <p className="text-sm text-surface-500 mb-4">
+                {transactions.length === 0
+                  ? 'Everything you record lands here — manual entries, receipt scans, imported statements and bot logs.'
+                  : 'Clear the search, switch the filter, or record your first expense.'}
+              </p>
               <button onClick={() => navigate('/add-expense')} className="btn-primary text-sm py-2.5 px-6">Add an expense</button>
             </div>
           ) : (
@@ -282,21 +283,51 @@ export default function SpendPage() {
                 <div key={date}>
                   <p className="text-xs font-semibold text-surface-500 mb-2">{date}</p>
                   <div className="card divide-y divide-surface-100">
-                    {txs.map(tx => (
-                      <div key={tx.id} className="flex items-center gap-3 p-3.5 group">
-                        <div className="w-9 h-9 bg-surface-100 rounded-lg flex items-center justify-center text-base">{getCategoryIcon(tx.category)}</div>
-                        <div className="flex-1 min-w-0">
-                          <p className="text-sm font-semibold text-navy-900 truncate">{tx.description}</p>
-                          <p className="text-xs text-surface-500 capitalize">{tx.category.replace('_', ' ')} · {getRelativeTime(tx.date)}</p>
+                    {txs.map(tx => {
+                      const isOpen = openId === tx.id;
+                      const config = DEFAULT_CATEGORIES.find(c => c.id === tx.category);
+                      return (
+                        <div key={tx.id}>
+                          <div className="flex items-center gap-3 p-3.5 group">
+                            <div className="w-9 h-9 bg-surface-100 rounded-lg flex items-center justify-center text-base shrink-0">{getCategoryIcon(tx.category)}</div>
+                            <button
+                              onClick={() => setOpenId(isOpen ? null : tx.id)}
+                              aria-expanded={isOpen}
+                              className="flex-1 min-w-0 text-left flex items-center gap-2"
+                            >
+                              <span className="min-w-0">
+                                <span className="block text-sm font-semibold text-navy-900 truncate">{tx.description || config?.name || 'Entry'}</span>
+                                <span className="block text-xs text-surface-500 capitalize truncate">
+                                  {config?.name || tx.category.replace('_', ' ')} · {getRelativeTime(tx.date)}
+                                </span>
+                              </span>
+                              <ChevronDown size={14} className={`text-surface-500 shrink-0 transition-transform ${isOpen ? 'rotate-180' : ''}`} />
+                            </button>
+                            <span className={`font-bold text-sm ${tx.type === 'income' ? 'text-emerald-700' : 'text-navy-900'}`}>
+                              {tx.type === 'income' ? '+' : '−'}{formatNaira(tx.amountInKobo)}
+                            </span>
+                            <button onClick={() => deleteTransaction(tx.id)} aria-label={`Delete ${tx.description}`} className="opacity-100 lg:opacity-0 lg:group-hover:opacity-100 p-2.5 -m-1 text-surface-500 hover:text-red-500 transition-all">
+                              <X size={14} />
+                            </button>
+                          </div>
+                          {isOpen && (
+                            <div className="px-3.5 pb-3.5 animate-slide-up">
+                              <dl className="grid grid-cols-2 gap-x-4 gap-y-2 rounded-xl bg-surface-50 p-3.5 text-xs">
+                                <div><dt className="text-surface-500">Date and time</dt><dd className="font-semibold text-navy-900">{new Date(tx.date).toLocaleString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })}</dd></div>
+                                <div><dt className="text-surface-500">Amount</dt><dd className="font-semibold text-navy-900">{formatNaira(tx.amountInKobo)}</dd></div>
+                                <div><dt className="text-surface-500">Category</dt><dd className="font-semibold text-navy-900 capitalize">{config?.name || tx.category.replace('_', ' ')}</dd></div>
+                                <div><dt className="text-surface-500">Budget bucket</dt><dd className="font-semibold text-navy-900">{getBucketLabel(tx.budgetBucket)}</dd></div>
+                                {tx.merchant && <div><dt className="text-surface-500">Merchant</dt><dd className="font-semibold text-navy-900">{tx.merchant}</dd></div>}
+                                {tx.paymentMethod && <div><dt className="text-surface-500">Method</dt><dd className="font-semibold text-navy-900">{tx.paymentMethod}</dd></div>}
+                                <div><dt className="text-surface-500">Recorded via</dt><dd className="font-semibold text-navy-900">{SOURCE_LABELS[tx.source] || tx.source}</dd></div>
+                                <div><dt className="text-surface-500">Sync</dt><dd className="font-semibold text-navy-900 capitalize">{tx.syncStatus}</dd></div>
+                                {tx.notes && <div className="col-span-2"><dt className="text-surface-500">Notes</dt><dd className="font-semibold text-navy-900">{tx.notes}</dd></div>}
+                              </dl>
+                            </div>
+                          )}
                         </div>
-                        <span className={`font-bold text-sm ${tx.type === 'income' ? 'text-emerald-700' : 'text-navy-900'}`}>
-                          {tx.type === 'income' ? '+' : '−'}{formatNaira(tx.amountInKobo)}
-                        </span>
-                        <button onClick={() => deleteTransaction(tx.id)} aria-label={`Delete ${tx.description}`} className="opacity-100 lg:opacity-0 lg:group-hover:opacity-100 p-2.5 -m-1 text-surface-500 hover:text-red-500 transition-all">
-                          <X size={14} />
-                        </button>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 </div>
               ))}
@@ -312,7 +343,7 @@ export default function SpendPage() {
             <div className="w-10 h-1 bg-surface-200 rounded-full mx-auto mb-4 lg:hidden" />
             <h3 className="font-bold text-navy-900 text-lg mb-1">Import a statement</h3>
             <p className="text-sm text-surface-500 mb-4">
-              Pick a <code className="text-[12px] bg-surface-100 px-1 rounded">date, description, amount</code> file. Rows are parsed on this device — nothing is uploaded anywhere.
+              Dates read day-first (05/10/2026 is 5 October). A header row is matched by column name, so debit, credit and balance columns stay separate; without one, Allawii reads <code className="text-[12px] bg-surface-100 px-1 rounded">date, description, amount</code>. Every row stays editable below before anything is saved. Rows are parsed on this device — nothing is uploaded anywhere.
             </p>
 
             <button
@@ -347,29 +378,49 @@ export default function SpendPage() {
                   {rows.map((r, i) => {
                     const on = kept.has(i);
                     return (
-                      <button
-                        key={`${r.description}-${i}`}
-                        onClick={() => setKept(prev => {
-                          const next = new Set(prev);
-                          if (next.has(i)) next.delete(i); else next.add(i);
-                          return next;
-                        })}
-                        className={`w-full flex items-center gap-3 p-3 text-left ${on ? '' : 'opacity-45'}`}
-                      >
+                      <div key={`${r.description}-${i}`} className={`w-full flex items-center gap-3 p-3 text-left ${on ? '' : 'opacity-45'}`}>
+                        <button
+                          onClick={() => setKept(prev => {
+                            const next = new Set(prev);
+                            if (next.has(i)) next.delete(i); else next.add(i);
+                            return next;
+                          })}
+                          className="flex-1 min-w-0 flex items-center gap-3 text-left"
+                        >
                         <span className={`w-5 h-5 rounded-md border flex items-center justify-center shrink-0 ${on ? 'bg-primary-600 border-primary-600 text-white' : 'border-surface-300'}`}>
                           {on && <Check size={13} />}
                         </span>
                         <span className="flex-1 min-w-0">
                           <span className="block text-sm font-semibold text-navy-900 truncate">{r.description}</span>
                           <span className="block text-[11px] text-surface-500">
-                            {new Date(r.date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })} · {r.category.name}
+                            {new Date(r.date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}
                             {r.duplicate && ' · possible duplicate'}
                           </span>
                         </span>
                         <span className={`font-bold text-sm ${r.type === 'income' ? 'text-emerald-700' : 'text-navy-900'}`}>
-                          {r.type === 'income' ? '+' : '−'}{formatNaira(nairaToKobo(r.amount))}
+                          {r.type === 'income' ? '+' : '−'}{formatNaira(Math.round(nairaToKobo(r.amount)))}
                         </span>
-                      </button>
+                        </button>
+                        <select
+                          value={r.category.id}
+                          onChange={(e) => setRows(list => list.map((row, j) => j === i
+                            ? { ...row, category: DEFAULT_CATEGORIES.find(c => c.id === e.target.value) || row.category }
+                            : row))}
+                          aria-label={`Category for ${r.description}`}
+                          className="text-[11px] rounded-lg border border-surface-200 bg-white px-1.5 py-1 shrink-0"
+                        >
+                          {DEFAULT_CATEGORIES.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                        </select>
+                        <button
+                          onClick={() => setRows(list => list.map((row, j) => j === i
+                            ? { ...row, type: row.type === 'income' ? 'expense' : 'income' }
+                            : row))}
+                          aria-label={`Record ${r.description} as ${r.type === 'income' ? 'an expense' : 'income'}`}
+                          className="text-[10px] font-semibold uppercase px-2 py-1 rounded-lg bg-surface-100 text-surface-600 shrink-0"
+                        >
+                          {r.type === 'income' ? 'in' : 'out'}
+                        </button>
+                      </div>
                     );
                   })}
                 </div>
@@ -379,7 +430,7 @@ export default function SpendPage() {
             <div className="flex gap-2">
               <button onClick={() => setShowImport(false)} className="btn-secondary flex-1 text-sm">Cancel</button>
               <button onClick={confirmImport} disabled={chosen.length === 0} className="btn-primary flex-1 text-sm disabled:opacity-40">
-                {chosen.length === 0 ? 'Select rows to import' : `Import ${chosen.length} · ${formatNaira(nairaToKobo(importTotal))}`}
+                {chosen.length === 0 ? 'Select rows to import' : `Import ${chosen.length} · ${formatNaira(Math.round(nairaToKobo(importTotal)))}`}
               </button>
             </div>
           </div>

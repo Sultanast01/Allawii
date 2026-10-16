@@ -1,261 +1,257 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
-import { join, dirname } from 'path';
-import { fileURLToPath } from 'url';
+import { supabaseAdmin } from '../lib/supabase.js';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const dataDir = join(__dirname, '..', '..', 'data');
-const dbPath = join(dataDir, 'allowii.json');
+/**
+ * Supabase Postgres repository. The Express server is the only writer:
+ * every table lives in `public` with RLS enabled but no policies, reachable
+ * through the service-role client. Date-like columns are stored as ISO text
+ * so rows round-trip through JS without timezone drift.
+ */
 
-if (!existsSync(dataDir)) mkdirSync(dataDir, { recursive: true });
+type Row = Record<string, any>;
 
-interface Database {
-  users: any[];
-  transactions: any[];
-  savingsGoals: any[];
-  obligations: any[];
-  bmoniAccounts: any[];
-  roundUpSettings: any[];
-  roundUpLedger: any[];
+const toSnake = (camel: string): string => camel.replace(/[A-Z]/g, c => `_${c.toLowerCase()}`);
+const toCamel = (snake: string): string => snake.replace(/_([a-z])/g, (_m, c: string) => c.toUpperCase());
+
+function mapRow<T = any>(row: Row | null | undefined, columns: readonly string[]): T | null {
+  if (!row) return null;
+  const out: Row = {};
+  for (const column of columns) {
+    const snake = toSnake(column);
+    if (snake in row) out[column] = row[snake];
+  }
+  return out as T;
 }
 
-function loadDb(): Database {
-  if (existsSync(dbPath)) {
-    const data = JSON.parse(readFileSync(dbPath, 'utf-8'));
-    // Ensure new arrays exist for backwards compatibility
-    if (!data.roundUpSettings) data.roundUpSettings = [];
-    if (!data.roundUpLedger) data.roundUpLedger = [];
-    // Migrate from naira to kobo if old field names are present
-    if (needsKoboMigration(data)) {
-      migrateToKobo(data);
-      saveDb(data);
-    }
-    return data;
+function mapWrite(row: Row): Row {
+  const out: Row = {};
+  for (const [key, value] of Object.entries(row)) {
+    if (value === undefined) continue;
+    out[toSnake(key)] = value;
   }
-  const empty: Database = { users: [], transactions: [], savingsGoals: [], obligations: [], bmoniAccounts: [], roundUpSettings: [], roundUpLedger: [] };
-  writeFileSync(dbPath, JSON.stringify(empty, null, 2));
-  return empty;
+  return out;
 }
 
-function needsKoboMigration(data: any): boolean {
-  return data.users?.some((u: any) => u.typicalIncome !== undefined && u.typicalIncomeInKobo === undefined) ||
-         data.transactions?.some((t: any) => t.amount !== undefined && t.amountInKobo === undefined);
+async function selectAll(table: string, userIdColumn: 'user_id' | 'id', userId: string, orderColumn?: string): Promise<Row[]> {
+  let query = supabaseAdmin().from(table).select('*').eq(userIdColumn, userId);
+  if (orderColumn) query = query.order(orderColumn);
+  const { data, error } = await query;
+  if (error) throw new Error(`${table} select failed: ${error.message}`);
+  return data ?? [];
 }
 
-function migrateToKobo(data: any): void {
-  if (data.users) {
-    data.users.forEach((u: any) => {
-      if (u.typicalIncome !== undefined && u.typicalIncomeInKobo === undefined) {
-        u.typicalIncomeInKobo = Math.round(u.typicalIncome * 100);
-        delete u.typicalIncome;
-      }
-    });
-  }
-  if (data.transactions) {
-    data.transactions.forEach((t: any) => {
-      if (t.amount !== undefined && t.amountInKobo === undefined) {
-        t.amountInKobo = Math.round(t.amount * 100);
-        delete t.amount;
-      }
-    });
-  }
-  if (data.savingsGoals) {
-    data.savingsGoals.forEach((g: any) => {
-      if (g.targetAmount !== undefined && g.targetAmountInKobo === undefined) {
-        g.targetAmountInKobo = Math.round(g.targetAmount * 100);
-        delete g.targetAmount;
-      }
-      if (g.currentAmount !== undefined && g.currentAmountInKobo === undefined) {
-        g.currentAmountInKobo = Math.round(g.currentAmount * 100);
-        delete g.currentAmount;
-      }
-      if (g.contributionPerCycle !== undefined && g.contributionPerCycleInKobo === undefined) {
-        g.contributionPerCycleInKobo = Math.round(g.contributionPerCycle * 100);
-        delete g.contributionPerCycle;
-      }
-    });
-  }
-  if (data.obligations) {
-    data.obligations.forEach((o: any) => {
-      if (o.amount !== undefined && o.amountInKobo === undefined) {
-        o.amountInKobo = Math.round(o.amount * 100);
-        delete o.amount;
-      }
-    });
-  }
-  if (data.roundUpSettings) {
-    data.roundUpSettings.forEach((s: any) => {
-      if (s.roundUpTo !== undefined && s.roundUpToInKobo === undefined) {
-        s.roundUpToInKobo = Math.round(s.roundUpTo * 100);
-        delete s.roundUpTo;
-      }
-      if (s.threshold !== undefined && s.thresholdInKobo === undefined) {
-        s.thresholdInKobo = Math.round(s.threshold * 100);
-        delete s.threshold;
-      }
-    });
-  }
-  if (data.roundUpLedger) {
-    data.roundUpLedger.forEach((e: any) => {
-      if (e.spareChange !== undefined && e.spareChangeInKobo === undefined) {
-        e.spareChangeInKobo = Math.round(e.spareChange * 100);
-        delete e.spareChange;
-      }
-      if (e.originalAmount !== undefined && e.originalAmountInKobo === undefined) {
-        e.originalAmountInKobo = Math.round(e.originalAmount * 100);
-        delete e.originalAmount;
-      }
-      if (e.roundedUp !== undefined && e.roundedUpInKobo === undefined) {
-        e.roundedUpInKobo = Math.round(e.roundedUp * 100);
-        delete e.roundedUp;
-      }
-    });
-  }
-}
+const PROFILE_COLUMNS = ['id', 'name', 'email', 'university', 'phoneNumber', 'incomeFrequency', 'typicalIncomeInKobo', 'nextIncomeDate', 'isDemo', 'botLinkCode', 'botLinkExpiresAt', 'streakDates', 'createdAt'] as const;
+const TRANSACTION_COLUMNS = ['id', 'userId', 'type', 'amountInKobo', 'category', 'description', 'date', 'merchant', 'paymentMethod', 'budgetBucket', 'notes', 'source', 'syncStatus', 'updatedAt'] as const;
+const GOAL_COLUMNS = ['id', 'userId', 'name', 'targetAmountInKobo', 'currentAmountInKobo', 'targetDate', 'contributionPerCycleInKobo', 'contributionFrequency', 'progress', 'isPaused', 'contributionDates', 'savingsType', 'withdrawalDate', 'createdAt', 'updatedAt'] as const;
+const BUDGET_COLUMNS = ['userId', 'category', 'name', 'bucket', 'allocatedInKobo', 'updatedAt'] as const;
+const BMONI_COLUMNS = ['id', 'userId', 'bmoniUserId', 'partnerUserId', 'profile', 'createdAt'] as const;
+const SETTINGS_COLUMNS = ['userId', 'enabled', 'roundUpToInKobo', 'thresholdInKobo', 'targetGoalId', 'targetWalletAddress', 'fromCurrency', 'toCurrency', 'lastSweepAt'] as const;
+const LEDGER_COLUMNS = ['id', 'userId', 'transactionId', 'originalAmountInKobo', 'roundedUpInKobo', 'spareChangeInKobo', 'status', 'createdAt', 'sweptAt', 'quoteData', 'transferData'] as const;
 
-function saveDb(data: Database) {
-  writeFileSync(dbPath, JSON.stringify(data, null, 2));
-}
+let goalExtras: boolean | null = null;
 
 const db = {
-  load: loadDb,
-  save: saveDb,
-
   users: {
-    find: (email: string) => loadDb().users.find(u => u.email === email),
-    findById: (id: string) => loadDb().users.find(u => u.id === id),
-    create: (user: any) => {
-      const data = loadDb();
-      data.users.push(user);
-      saveDb(data);
+    find: async (email: string) => {
+      const { data, error } = await supabaseAdmin().from('profiles').select('*').eq('email', email).maybeSingle();
+      if (error) throw new Error(`users.find failed: ${error.message}`);
+      return mapRow(data, PROFILE_COLUMNS);
+    },
+    findById: async (id: string) => {
+      const { data, error } = await supabaseAdmin().from('profiles').select('*').eq('id', id).maybeSingle();
+      if (error) throw new Error(`users.findById failed: ${error.message}`);
+      return mapRow(data, PROFILE_COLUMNS);
+    },
+    findByPhone: async (phone: string) => {
+      const { data, error } = await supabaseAdmin().from('profiles').select('*').eq('phone_number', phone).maybeSingle();
+      if (error) throw new Error(`users.findByPhone failed: ${error.message}`);
+      return mapRow<any>(data, PROFILE_COLUMNS);
+    },
+    findByBotLinkCode: async (code: string) => {
+      const { data, error } = await supabaseAdmin().from('profiles').select('*').eq('bot_link_code', code).maybeSingle();
+      if (error) throw new Error(`users.findByBotLinkCode failed: ${error.message}`);
+      return mapRow<any>(data, PROFILE_COLUMNS);
+    },
+    create: async (user: Row) => {
+      const { error } = await supabaseAdmin().from('profiles').insert(mapWrite(user));
+      if (error) throw new Error(`users.create failed: ${error.message}`);
       return user;
     },
-    update: (id: string, updates: any) => {
-      const data = loadDb();
-      const idx = data.users.findIndex(u => u.id === id);
-      if (idx >= 0) { data.users[idx] = { ...data.users[idx], ...updates }; saveDb(data); }
-      return data.users[idx];
+    update: async (id: string, updates: Row) => {
+      const { error } = await supabaseAdmin().from('profiles').update(mapWrite(updates)).eq('id', id);
+      if (error) throw new Error(`users.update failed: ${error.message}`);
+      return db.users.findById(id);
     },
   },
 
   transactions: {
-    findByUser: (userId: string, filters?: { type?: string; category?: string; bucket?: string; limit?: number }) => {
-      let txs = loadDb().transactions.filter(t => t.userId === userId);
-      if (filters?.type) txs = txs.filter(t => t.type === filters.type);
-      if (filters?.category) txs = txs.filter(t => t.category === filters.category);
-      if (filters?.bucket) txs = txs.filter(t => t.budgetBucket === filters.bucket);
-      txs.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-      if (filters?.limit) txs = txs.slice(0, filters.limit);
-      return txs;
+    findByUser: async (userId: string, filters?: { type?: string; category?: string; bucket?: string; limit?: number }) => {
+      let query = supabaseAdmin().from('transactions').select('*').eq('user_id', userId);
+      if (filters?.type) query = query.eq('type', filters.type);
+      if (filters?.category) query = query.eq('category', filters.category);
+      if (filters?.bucket) query = query.eq('budget_bucket', filters.bucket);
+      query = query.order('date', { ascending: false });
+      if (filters?.limit) query = query.limit(filters.limit);
+      const { data, error } = await query;
+      if (error) throw new Error(`transactions.findByUser failed: ${error.message}`);
+      return (data ?? []).map(row => mapRow(row, TRANSACTION_COLUMNS));
     },
-    create: (tx: any) => {
-      const data = loadDb();
-      data.transactions.push(tx);
-      saveDb(data);
+    findById: async (id: string, userId: string) => {
+      const { data, error } = await supabaseAdmin().from('transactions').select('*').eq('id', id).eq('user_id', userId).maybeSingle();
+      if (error) throw new Error(`transactions.findById failed: ${error.message}`);
+      return mapRow(data, TRANSACTION_COLUMNS);
+    },
+    create: async (tx: Row) => {
+      const { error } = await supabaseAdmin().from('transactions').insert(mapWrite(tx));
+      if (error) throw new Error(`transactions.create failed: ${error.message}`);
       return tx;
     },
-    update: (id: string, userId: string, updates: any) => {
-      const data = loadDb();
-      const idx = data.transactions.findIndex(t => t.id === id && t.userId === userId);
-      if (idx >= 0) { data.transactions[idx] = { ...data.transactions[idx], ...updates }; saveDb(data); }
-      return data.transactions[idx];
+    update: async (id: string, userId: string, updates: Row) => {
+      const { error } = await supabaseAdmin().from('transactions').update(mapWrite(updates)).eq('id', id).eq('user_id', userId);
+      if (error) throw new Error(`transactions.update failed: ${error.message}`);
+      return db.transactions.findById(id, userId);
     },
-    delete: (id: string, userId: string) => {
-      const data = loadDb();
-      data.transactions = data.transactions.filter(t => !(t.id === id && t.userId === userId));
-      saveDb(data);
+    delete: async (id: string, userId: string) => {
+      const { error } = await supabaseAdmin().from('transactions').delete().eq('id', id).eq('user_id', userId);
+      if (error) throw new Error(`transactions.delete failed: ${error.message}`);
     },
-    summary: (userId: string) => {
-      const txs = loadDb().transactions.filter(t => t.userId === userId);
-      const income = txs.filter(t => t.type === 'income').reduce((s, t) => s + (t.amountInKobo || 0), 0);
-      const expenses = txs.filter(t => t.type === 'expense').reduce((s, t) => s + (t.amountInKobo || 0), 0);
+    summary: async (userId: string) => {
+      const rows = (await db.transactions.findByUser(userId)) as any[];
+      const income = rows.filter(t => t.type === 'income').reduce((s, t) => s + (Number(t.amountInKobo) || 0), 0);
+      const expenses = rows.filter(t => t.type === 'expense').reduce((s, t) => s + (Number(t.amountInKobo) || 0), 0);
       const byBucket: Record<string, number> = {};
       const byCategory: Record<string, number> = {};
-      txs.filter(t => t.type === 'expense').forEach(t => {
-        byBucket[t.budgetBucket] = (byBucket[t.budgetBucket] || 0) + (t.amountInKobo || 0);
-        byCategory[t.category] = (byCategory[t.category] || 0) + (t.amountInKobo || 0);
+      rows.filter(t => t.type === 'expense').forEach(t => {
+        byBucket[t.budgetBucket] = (byBucket[t.budgetBucket] || 0) + (Number(t.amountInKobo) || 0);
+        byCategory[t.category] = (byCategory[t.category] || 0) + (Number(t.amountInKobo) || 0);
       });
       return { totalIncomeInKobo: income, totalExpensesInKobo: expenses, balanceInKobo: income - expenses, byBucket, byCategory };
     },
   },
 
   savingsGoals: {
-    findByUser: (userId: string) => loadDb().savingsGoals.filter(goal => goal.userId === userId),
-    findById: (id: string, userId: string) => loadDb().savingsGoals.find(goal => goal.id === id && goal.userId === userId),
-    create: (goal: any) => {
-      const data = loadDb();
-      data.savingsGoals.push(goal);
-      saveDb(data);
+    /**
+     * `savings_type` and `withdrawal_date` were added after the first deploy, so a project that
+     * has not re-run schema.sql yet has no such columns. The writer asks once, caches the answer,
+     * and leaves the fields out until the migration lands instead of failing the whole batch.
+     */
+    supportsExtras: async (): Promise<boolean> => {
+      if (goalExtras !== null) return goalExtras;
+      const { error } = await supabaseAdmin().from('savings_goals').select('savings_type, withdrawal_date').limit(0);
+      goalExtras = !error;
+      return goalExtras;
+    },
+    findByUser: async (userId: string) => {
+      const rows = await selectAll('savings_goals', 'user_id', userId);
+      return rows.map(row => mapRow(row, GOAL_COLUMNS));
+    },
+    findById: async (id: string, userId: string) => {
+      const { data, error } = await supabaseAdmin().from('savings_goals').select('*').eq('id', id).eq('user_id', userId).maybeSingle();
+      if (error) throw new Error(`savingsGoals.findById failed: ${error.message}`);
+      return mapRow(data, GOAL_COLUMNS);
+    },
+    create: async (goal: Row) => {
+      const { error } = await supabaseAdmin().from('savings_goals').insert(mapWrite(goal));
+      if (error) throw new Error(`savingsGoals.create failed: ${error.message}`);
       return goal;
     },
-    update: (id: string, userId: string, updates: any) => {
-      const data = loadDb();
-      const idx = data.savingsGoals.findIndex(goal => goal.id === id && goal.userId === userId);
-      if (idx >= 0) { data.savingsGoals[idx] = { ...data.savingsGoals[idx], ...updates }; saveDb(data); return data.savingsGoals[idx]; }
-      return null;
+    update: async (id: string, userId: string, updates: Row) => {
+      const { error } = await supabaseAdmin().from('savings_goals').update(mapWrite(updates)).eq('id', id).eq('user_id', userId);
+      if (error) throw new Error(`savingsGoals.update failed: ${error.message}`);
+      return db.savingsGoals.findById(id, userId);
     },
-    delete: (id: string, userId: string) => {
-      const data = loadDb();
-      data.savingsGoals = data.savingsGoals.filter(goal => !(goal.id === id && goal.userId === userId));
-      saveDb(data);
+    delete: async (id: string, userId: string) => {
+      const { error } = await supabaseAdmin().from('savings_goals').delete().eq('id', id).eq('user_id', userId);
+      if (error) throw new Error(`savingsGoals.delete failed: ${error.message}`);
     },
-    replaceForUser: (userId: string, goals: any[]) => {
-      const data = loadDb();
-      data.savingsGoals = data.savingsGoals.filter(goal => goal.userId !== userId).concat(goals);
-      saveDb(data);
-      return goals;
+  },
+
+  budgetPlans: {
+    findByUser: async (userId: string) => {
+      const rows = await selectAll('budget_plans', 'user_id', userId);
+      return rows.map(row => mapRow(row, BUDGET_COLUMNS));
+    },
+    replaceForUser: async (userId: string, plans: Row[]) => {
+      const supabase = supabaseAdmin();
+      const { error: delError } = await supabase.from('budget_plans').delete().eq('user_id', userId);
+      if (delError) throw new Error(`budgetPlans clear failed: ${delError.message}`);
+      if (plans.length) {
+        const { error } = await supabase.from('budget_plans').insert(plans.map(plan => mapWrite({ ...plan, userId })));
+        if (error) throw new Error(`budgetPlans replace failed: ${error.message}`);
+      }
+      return plans;
     },
   },
 
   bmoniAccounts: {
-    findByUser: (userId: string) => loadDb().bmoniAccounts.find(a => a.userId === userId),
-    create: (account: any) => {
-      const data = loadDb();
-      data.bmoniAccounts.push(account);
-      saveDb(data);
+    findByUser: async (userId: string) => {
+      const { data, error } = await supabaseAdmin().from('bmoni_accounts').select('*').eq('user_id', userId).maybeSingle();
+      if (error) throw new Error(`bmoniAccounts.findByUser failed: ${error.message}`);
+      return mapRow(data, BMONI_COLUMNS);
+    },
+    create: async (account: Row) => {
+      const { error } = await supabaseAdmin().from('bmoni_accounts').insert(mapWrite(account));
+      if (error) throw new Error(`bmoniAccounts.create failed: ${error.message}`);
       return account;
     },
   },
 
   roundUpSettings: {
-    findByUser: (userId: string) => loadDb().roundUpSettings.find(s => s.userId === userId),
-    upsert: (userId: string, settings: any) => {
-      const data = loadDb();
-      const idx = data.roundUpSettings.findIndex(s => s.userId === userId);
-      if (idx >= 0) {
-        data.roundUpSettings[idx] = { ...data.roundUpSettings[idx], ...settings };
-        saveDb(data);
-        return data.roundUpSettings[idx];
-      }
-      const newSettings = { userId, ...settings };
-      data.roundUpSettings.push(newSettings);
-      saveDb(data);
-      return newSettings;
+    findByUser: async (userId: string) => {
+      const { data, error } = await supabaseAdmin().from('round_up_settings').select('*').eq('user_id', userId).maybeSingle();
+      if (error) throw new Error(`roundUpSettings.findByUser failed: ${error.message}`);
+      return mapRow<any>(data, SETTINGS_COLUMNS);
+    },
+    upsert: async (userId: string, settings: Row) => {
+      const { error } = await supabaseAdmin()
+        .from('round_up_settings')
+        .upsert(mapWrite({ ...settings, userId }), { onConflict: 'user_id' });
+      if (error) throw new Error(`roundUpSettings.upsert failed: ${error.message}`);
+      return db.roundUpSettings.findByUser(userId);
     },
   },
 
   roundUpLedger: {
-    findByUser: (userId: string) => {
-      const entries = loadDb().roundUpLedger.filter(e => e.userId === userId);
-      entries.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-      return entries;
+    findByUser: async (userId: string) => {
+      const rows = await selectAll('round_up_ledger', 'user_id', userId, 'created_at');
+      return rows.map(row => mapRow<any>(row, LEDGER_COLUMNS)).reverse();
     },
-    create: (entry: any) => {
-      const data = loadDb();
-      data.roundUpLedger.push(entry);
-      saveDb(data);
+    create: async (entry: Row) => {
+      const { error } = await supabaseAdmin().from('round_up_ledger').insert(mapWrite(entry));
+      if (error) throw new Error(`roundUpLedger.create failed: ${error.message}`);
       return entry;
     },
-    update: (id: string, userId: string, updates: any) => {
-      const data = loadDb();
-      const idx = data.roundUpLedger.findIndex(e => e.id === id && e.userId === userId);
-      if (idx >= 0) {
-        data.roundUpLedger[idx] = { ...data.roundUpLedger[idx], ...updates };
-        saveDb(data);
-        return data.roundUpLedger[idx];
-      }
-      return null;
+    update: async (id: string, userId: string, updates: Row) => {
+      const { error } = await supabaseAdmin().from('round_up_ledger').update(mapWrite(updates)).eq('id', id).eq('user_id', userId);
+      if (error) throw new Error(`roundUpLedger.update failed: ${error.message}`);
+      const rows = await selectAll('round_up_ledger', 'user_id', userId);
+      return mapRow(rows.find(r => r.id === id), LEDGER_COLUMNS);
+    },
+  },
+
+  botLinks: {
+    link: async (chatId: string, userId: string) => {
+      const { error } = await supabaseAdmin()
+        .from('bot_links')
+        .upsert({ chat_id: String(chatId), user_id: userId, created_at: new Date().toISOString() }, { onConflict: 'chat_id' });
+      if (error) throw new Error(`botLinks.link failed: ${error.message}`);
+    },
+    findByChatId: async (chatId: string) => {
+      const { data, error } = await supabaseAdmin().from('bot_links').select('*').eq('chat_id', String(chatId)).maybeSingle();
+      if (error) throw new Error(`botLinks.findByChatId failed: ${error.message}`);
+      return data ? { chatId: data.chat_id, userId: data.user_id, createdAt: data.created_at } : null;
+    },
+    findByUserId: async (userId: string) => {
+      const { data, error } = await supabaseAdmin().from('bot_links').select('*').eq('user_id', userId).maybeSingle();
+      if (error) throw new Error(`botLinks.findByUserId failed: ${error.message}`);
+      return data ? { chatId: data.chat_id, userId: data.user_id, createdAt: data.created_at } : null;
+    },
+    all: async () => {
+      const { data, error } = await supabaseAdmin().from('bot_links').select('chat_id,user_id');
+      if (error) throw new Error(`botLinks.all failed: ${error.message}`);
+      return (data || []).map(row => ({ chatId: String(row.chat_id), userId: String(row.user_id) }));
     },
   },
 };
 
+export { toCamel };
 export default db;

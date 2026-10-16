@@ -7,23 +7,34 @@ import { Plus, Check, Wallet, Target, Users, Repeat, ArrowUpCircle, X } from 'lu
 const typeIcon: Record<string, any> = { income: ArrowUpCircle, obligation: Wallet, goal: Target, group: Users, recurring: Repeat };
 const typeColor: Record<string, string> = { income: 'text-emerald-700 bg-emerald-50', obligation: 'text-red-600 bg-red-50', goal: 'text-primary-600 bg-primary-50', group: 'text-purple-600 bg-purple-50', recurring: 'text-sky-600 bg-sky-50' };
 
+const PRESET_TYPES = ['obligation', 'income', 'goal', 'group', 'recurring'] as const;
+const typeLabels: Record<string, string> = { obligation: 'Obligation', income: 'Expected income', goal: 'Savings milestone', group: 'Group contribution', recurring: 'Recurring expense' };
+
 export default function CalendarPage() {
   const { calendarEvents, addCalendarEvent, toggleCalendarEvent } = useStore();
   const [showAdd, setShowAdd] = useState(false);
-  const [form, setForm] = useState({ title: '', date: '', amount: '', type: 'obligation' as any });
+  const [form, setForm] = useState({ title: '', date: '', amount: '', type: 'obligation', customType: '' });
 
   const sorted = [...calendarEvents].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
 
   const handleAdd = () => {
     if (!form.title || !form.date) return;
-    addCalendarEvent({ title: form.title, date: new Date(form.date).toISOString(), type: form.type, amountInKobo: form.amount ? nairaToKobo(Number(form.amount)) : undefined, isCompleted: false });
-    setForm({ title: '', date: '', amount: '', type: 'obligation' });
+    const custom = form.customType.trim();
+    if (form.type === 'other' && !custom) return;
+    addCalendarEvent({
+      title: form.title,
+      date: new Date(form.date).toISOString(),
+      type: form.type === 'other' ? custom : form.type,
+      amountInKobo: form.amount ? nairaToKobo(Number(form.amount)) : undefined,
+      isCompleted: false,
+    });
+    setForm({ title: '', date: '', amount: '', type: 'obligation', customType: '' });
     setShowAdd(false);
   };
 
   return (
     <div>
-      <Header title="Financial Calendar" showBack />
+      <Header title="Financial Calendar" />
 
       <div className="px-5 pt-5 space-y-4 pb-8 lg:px-10 lg:grid lg:grid-cols-3 lg:gap-8 lg:space-y-0 lg:content-start">
         <div className="flex items-start justify-between lg:col-span-2">
@@ -45,12 +56,18 @@ export default function CalendarPage() {
               <input type="number" placeholder="Amount (₦)" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} className="input-field text-sm" />
             </div>
             <select value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value })} className="input-field text-sm">
-              <option value="obligation">Obligation</option>
-              <option value="income">Expected income</option>
-              <option value="goal">Savings milestone</option>
-              <option value="group">Group contribution</option>
-              <option value="recurring">Recurring expense</option>
+              {PRESET_TYPES.map(t => <option key={t} value={t}>{typeLabels[t]}</option>)}
+              <option value="other">Other — type your own</option>
             </select>
+            {form.type === 'other' && (
+              <input
+                type="text"
+                placeholder="e.g. Church dues, Laptop repair"
+                value={form.customType}
+                onChange={(e) => setForm({ ...form, customType: e.target.value })}
+                className="input-field text-sm"
+              />
+            )}
             <button onClick={handleAdd} className="btn-primary w-full text-sm py-2.5">Add event</button>
           </div>
         )}
@@ -61,13 +78,14 @@ export default function CalendarPage() {
             const dl = daysUntil(e.date);
             return (
               <div key={e.id} className={`card p-4 flex items-center gap-3 ${e.isCompleted ? 'opacity-50' : ''}`}>
-                <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${typeColor[e.type]}`}>
+                <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${typeColor[e.type] || 'text-surface-600 bg-surface-100'}`}>
                   <Icon size={18} />
                 </div>
                 <div className="flex-1 min-w-0">
                   <p className={`text-sm font-semibold text-navy-900 truncate ${e.isCompleted ? 'line-through' : ''}`}>{e.title}</p>
                   <p className="text-xs text-surface-500">
                     {new Date(e.date).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' })}
+                    {!PRESET_TYPES.includes(e.type as any) && <span> · {e.type}</span>}
                     {dl > 0 && !e.isCompleted && <span className={dl <= 3 ? ' text-red-500 font-medium' : ''}> · in {dl} days</span>}
                   </p>
                 </div>

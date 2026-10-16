@@ -40,7 +40,7 @@ export default function ScamPage() {
 
   return (
     <div>
-      <Header title="Scam Safety Check" showBack />
+      <Header title="Scam Safety Check" />
 
       <div className="px-5 pt-5 pb-8 space-y-4 lg:px-10 lg:grid lg:grid-cols-2 lg:gap-8 lg:space-y-0 lg:items-start">
         <div className="lg:col-span-2">

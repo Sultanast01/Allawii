@@ -138,7 +138,7 @@ export default function PatternsPage() {
 
   return (
     <div>
-      <Header title="Spending Patterns" showBack />
+      <Header title="Spending Patterns" />
 
       <div className="px-5 pt-5 space-y-5 lg:px-10 lg:pt-10 lg:grid lg:grid-cols-2 lg:gap-8 lg:items-start">
         {/* Header spans both columns */}

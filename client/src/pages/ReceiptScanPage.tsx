@@ -3,75 +3,10 @@ import { useNavigate } from 'react-router-dom';
 import { useStore } from '../context/store';
 import Header from '../components/Header';
 import { formatNaira } from '../utils';
+import { parseReceipt, suggestCategory, type ExtractedReceipt } from '../utils/parsing';
 import { Camera, Upload, Check, Sparkles, Image as ImageIcon, X, Plus, Loader2 } from 'lucide-react';
 
-interface Extracted {
-  merchant: string;
-  date: string;
-  total: number;
-  items: { name: string; price: number }[];
-}
-
-/** Trailing amount on a receipt line: "RICE 5KG   2,800.00" → 2800.00 */
-const AMOUNT_RE = /([\d,]+\.\d{2}|[\d,]{3,}(?:\.\d{1,2})?)\s*$/;
-const SKIP_LINE_RE = /(sub\s*-?\s*total|\bvat\b|\btax\b|\bcash\b|\bchange\b|balance|discount|\btel\b|phone|\btotal\b|amount\s*due|thank)/i;
-
-function parseAmount(raw: string): number {
-  return parseFloat(raw.replace(/,/g, ''));
-}
-
-/** Accepts 15/10/2026, 15-10-26 (d/m/y) and 2026-10-15. */
-function extractDate(text: string): string | null {
-  const dmy = text.match(/\b(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})\b/);
-  if (dmy) {
-    const [, d, m, yRaw] = dmy;
-    const y = yRaw.length === 2 ? `20${yRaw}` : yRaw;
-    if (+m >= 1 && +m <= 12 && +d >= 1 && +d <= 31) {
-      return `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
-    }
-  }
-  const iso = text.match(/\b(\d{4})-(\d{2})-(\d{2})\b/);
-  return iso ? `${iso[1]}-${iso[2]}-${iso[3]}` : null;
-}
-
-export function parseReceipt(text: string): Extracted {
-  const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-
-  const merchant =
-    (lines.find((l) => (l.match(/[A-Za-z]/g) || []).length >= 3 && !AMOUNT_RE.test(l)) || 'Unknown merchant')
-      .replace(/^[-*=•.\s]+|[-*=•.\s]+$/g, '')
-      .slice(0, 40);
-
-  const items: { name: string; price: number }[] = [];
-  for (const line of lines) {
-    const m = line.match(AMOUNT_RE);
-    if (!m || m.index === undefined) continue;
-    if (SKIP_LINE_RE.test(line)) continue;
-    const name = line.slice(0, m.index).replace(/[\s.\-•*=]+$/g, '').trim();
-    if (name.replace(/[^A-Za-z0-9]/g, '').length < 2) continue;
-    const price = parseAmount(m[1]);
-    if (!isFinite(price) || price <= 0) continue;
-    items.push({ name, price });
-  }
-
-  let total = 0;
-  for (const line of lines) {
-    if (/\btotal\b/i.test(line) && !/sub\s*-?\s*total/i.test(line)) {
-      const m = line.match(AMOUNT_RE);
-      if (m) {
-        total = parseAmount(m[1]);
-        break;
-      }
-    }
-  }
-
-  return {
-    merchant,
-    date: extractDate(text) || new Date().toISOString().slice(0, 10),
-    total,
-    items,
-  };
-}
+type Extracted = ExtractedReceipt;
 
 const SAMPLE: Extracted = {
   merchant: 'Justrite Supermarket',
@@ -155,10 +90,11 @@ export default function ReceiptScanPage() {
   const handleSave = () => {
     if (!extracted || extracted.items.length === 0) return;
     extracted.items.forEach((item) => {
+      const category = suggestCategory(`${item.name} ${extracted.merchant}`);
       addTransaction({
-        userId: 'user', type: 'expense', amountInKobo: Math.round(item.price * 100), category: 'food',
+        userId: 'user', type: 'expense', amountInKobo: Math.round(item.price * 100), category: category.id,
         description: item.name || 'Receipt item', date: new Date(extracted.date).toISOString(),
-        merchant: extracted.merchant, budgetBucket: 'essentials', source: 'receipt',
+        merchant: extracted.merchant, budgetBucket: category.bucket, source: 'receipt',
       });
     });
     setSaved(true);
@@ -170,7 +106,7 @@ export default function ReceiptScanPage() {
   if (saved) {
     return (
       <div>
-        <Header title="Scan Receipt" showBack />
+        <Header title="Scan Receipt" />
         <div className="px-5 pt-20 text-center animate-scale-in">
           <div className="w-16 h-16 bg-emerald-100 rounded-full flex items-center justify-center mx-auto mb-4">
             <Check size={32} className="text-emerald-700" />
@@ -184,7 +120,7 @@ export default function ReceiptScanPage() {
 
   return (
     <div>
-      <Header title="Scan Receipt" showBack />
+      <Header title="Scan Receipt" />
 
       <div className="px-5 pt-5 pb-8 space-y-5 lg:px-10 lg:max-w-3xl">
         {stage !== 'review' && (

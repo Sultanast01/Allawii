@@ -20,11 +20,6 @@ const FAQS = [
     answer: 'Yes. All data is stored locally on your device (or in your account if you create one). We never share your financial information with third parties. The B Moni integration uses sandbox mode only.',
   },
   {
-    id: '4',
-    question: 'Can I export my transaction data?',
-    answer: 'Yes. Go to Profile > Export my data to download a JSON file of all your transactions, goals, and settings.',
-  },
-  {
     id: '5',
     question: 'How do streaks work?',
     answer: 'A streak counts consecutive days you contribute to a savings goal. Missing a day breaks the streak, but you can start again anytime. Milestones are awarded at 3, 7, 14, 30, 60, and 90 days.',
@@ -61,7 +56,7 @@ export default function HelpPage() {
 
   return (
     <>
-      <Header title="Help & Support" showBack />
+      <Header title="Help & Support" />
 
       <div className="px-5 py-4 space-y-4 pb-8 lg:px-10 lg:max-w-3xl">
         {/* Contact support */}

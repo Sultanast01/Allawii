@@ -79,7 +79,7 @@ export function getCategoryIcon(categoryId: string): string {
     rent: '🏠', school_fees: '🎓', debt: '💳', family: '❤️', dues: '👥',
     food: '🍽️', transport: '🚌', data_airtime: '📱', academics: '📚', utilities: '⚡',
     emergency: '🛡️', savings: '🐷', education: '🎯', entertainment: '🎮',
-    social: '🎉', eating_out: '☕', shopping: '🛍️',
+    social: '🎉', eating_out: '☕', shopping: '🛍️', other_expense: '🧾',
   };
   return icons[categoryId] || '💰';
 }

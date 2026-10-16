@@ -10,6 +10,7 @@ router.use(authMiddleware);
 const MAX_ROWS = 5000;
 const BUCKETS = new Set(['obligations', 'essentials', 'future_you', 'enjoyment']);
 const FREQUENCIES = new Set(['daily', 'weekly', 'monthly', 'term']);
+const SAVINGS_TYPES = new Set(['emergency', 'target', 'flexible']);
 
 function str(value: unknown, max: number): string | null {
   if (value === undefined || value === null) return null;
@@ -76,6 +77,11 @@ function cleanGoal(raw: unknown, userId: string): MergeRow | null {
   const name = str(row.name, 60);
   if (!name) return null;
   const frequency = str(row.contributionFrequency, 20);
+  const savingsType = str(row.savingsType, 20);
+  const streak = row.streak as { contributionDates?: unknown } | undefined;
+  const contributionDates = Array.isArray(streak?.contributionDates)
+    ? streak!.contributionDates!.map(value => str(value, 12)).filter((value): value is string => Boolean(value)).slice(0, 1000)
+    : [];
   return {
     id,
     userId,
@@ -85,11 +91,26 @@ function cleanGoal(raw: unknown, userId: string): MergeRow | null {
     targetDate: isoDate(row.targetDate),
     contributionPerCycleInKobo: kobo(row.contributionPerCycleInKobo),
     contributionFrequency: frequency && FREQUENCIES.has(frequency) ? frequency : 'monthly',
+    savingsType: savingsType && SAVINGS_TYPES.has(savingsType) ? savingsType : 'target',
+    withdrawalDate: isoDate(row.withdrawalDate),
     progress: percent(row.progress),
     isPaused: Boolean(row.isPaused),
+    contributionDates,
     createdAt: isoDate(row.createdAt) || new Date().toISOString(),
     updatedAt: str(row.updatedAt, 40) || undefined,
   };
+}
+
+/** Droppable until the project has the goal extras columns; see db.savingsGoals.supportsExtras(). */
+async function withGoalExtras(goals: MergeRow[]): Promise<MergeRow[]> {
+  if (goals.length === 0) return goals;
+  if (await db.savingsGoals.supportsExtras()) return goals;
+  return goals.map(goal => {
+    const withoutExtras: MergeRow = { ...goal };
+    delete withoutExtras.savingsType;
+    delete withoutExtras.withdrawalDate;
+    return withoutExtras;
+  });
 }
 
 function rows(value: unknown, userId: string, clean: (raw: unknown, userId: string) => MergeRow | null): MergeRow[] {
@@ -97,72 +118,107 @@ function rows(value: unknown, userId: string, clean: (raw: unknown, userId: stri
   return value.slice(0, MAX_ROWS).map(raw => clean(raw, userId)).filter((row): row is MergeRow => Boolean(row));
 }
 
-function applyMerge(
-  stored: MergeRow[],
-  plan: ReturnType<typeof planLedgerMerge>,
-  create: (row: any) => void,
-  update: (id: string, row: any) => void,
-  remove: (id: string) => void,
-  userId: string,
-) {
-  const storedIds = new Set(stored.map(row => row.id));
-  for (const row of plan.writes) {
-    if (storedIds.has(row.id)) update(row.id, row);
-    else create({ ...row, userId });
-  }
-  for (const id of plan.deletes) remove(id);
+function cleanBudgetPlan(raw: unknown) {
+  const row = (raw || {}) as Record<string, unknown>;
+  const category = str(row.id, 40) || str(row.category, 40);
+  if (!category) return null;
+  const bucket = str(row.bucket, 20);
+  return {
+    category,
+    name: str(row.name, 60) || category,
+    bucket: bucket && BUCKETS.has(bucket) ? bucket : 'essentials',
+    allocatedInKobo: kobo(row.allocatedInKobo),
+    updatedAt: new Date().toISOString(),
+  };
 }
 
-router.get('/state', (req: Request, res: Response) => {
+router.get('/state', async (req: Request, res: Response) => {
   const userId = (req as any).userId;
+  const [profile, transactions, savingsGoals, budgetPlans] = await Promise.all([
+    db.users.findById(userId) as any,
+    db.transactions.findByUser(userId),
+    db.savingsGoals.findByUser(userId),
+    db.budgetPlans.findByUser(userId),
+  ]);
   res.json({
-    transactions: db.transactions.findByUser(userId),
-    savingsGoals: db.savingsGoals.findByUser(userId),
+    transactions,
+    savingsGoals,
+    categoryBudgets: budgetPlans.map(plan => ({ id: (plan as any).category, ...plan })),
+    streakDates: (profile as any)?.streakDates || [],
     syncedAt: new Date().toISOString(),
   });
 });
 
-// The app keeps its ledger in the browser; the WhatsApp bot can only answer from this API,
+// The app keeps its ledger in the browser; the Telegram bot can only answer from this API,
 // so both sides push and pull through here and the server row is the shared truth.
-router.put('/state', (req: Request, res: Response) => {
+router.put('/state', async (req: Request, res: Response) => {
   const userId = (req as any).userId;
   const body = (req.body || {}) as Record<string, unknown>;
   const now = new Date().toISOString();
 
-  const storedTransactions = db.transactions.findByUser(userId);
+  const storedTransactions = await db.transactions.findByUser(userId);
   const incomingTransactions = prepareIncoming(rows(body.transactions, userId, cleanTransaction), now);
   const transactionPlan = planLedgerMerge(storedTransactions, incomingTransactions, idList(body.deletedTransactionIds));
-  applyMerge(
-    storedTransactions,
+
+  const storedGoals = await db.savingsGoals.findByUser(userId);
+  const incomingGoals = prepareIncoming(await withGoalExtras(rows(body.savingsGoals, userId, cleanGoal)), now);
+  const goalPlan = planLedgerMerge(storedGoals, incomingGoals, idList(body.deletedGoalIds));
+
+  const applyLedger = async (
+    plan: ReturnType<typeof planLedgerMerge>,
+    stored: (MergeRow | null)[],
+    create: (row: any) => Promise<unknown>,
+    update: (id: string, row: any) => Promise<unknown>,
+    remove: (id: string) => Promise<unknown>,
+  ) => {
+    const storedIds = new Set(stored.map(row => row?.id));
+    for (const row of plan.writes) {
+      if (storedIds.has(row.id)) await update(row.id, row);
+      else await create({ ...row, userId });
+    }
+    for (const id of plan.deletes) await remove(id);
+  };
+
+  await applyLedger(
     transactionPlan,
+    storedTransactions,
     row => db.transactions.create(row),
     (id, row) => db.transactions.update(id, userId, row),
     id => db.transactions.delete(id, userId),
-    userId,
   );
-
-  const storedGoals = db.savingsGoals.findByUser(userId);
-  const incomingGoals = prepareIncoming(rows(body.savingsGoals, userId, cleanGoal), now);
-  const goalPlan = planLedgerMerge(storedGoals, incomingGoals, idList(body.deletedGoalIds));
-  applyMerge(
-    storedGoals,
+  await applyLedger(
     goalPlan,
+    storedGoals,
     row => db.savingsGoals.create(row),
     (id, row) => db.savingsGoals.update(id, userId, row),
     id => db.savingsGoals.delete(id, userId),
-    userId,
   );
 
+  if (Array.isArray(body.categoryBudgets)) {
+    const plans = body.categoryBudgets.slice(0, MAX_ROWS).map(cleanBudgetPlan).filter(Boolean);
+    await db.budgetPlans.replaceForUser(userId, plans as any[]);
+  }
+
+  if (Array.isArray(body.streakDates)) {
+    const dates = body.streakDates.map(value => str(value, 12)).filter((value): value is string => Boolean(value)).slice(0, 1000);
+    await db.users.update(userId, { streakDates: dates });
+  }
+
+  const [transactions, savingsGoals] = await Promise.all([
+    db.transactions.findByUser(userId),
+    db.savingsGoals.findByUser(userId),
+  ]);
+
   res.json({
-    transactions: db.transactions.findByUser(userId),
-    savingsGoals: db.savingsGoals.findByUser(userId),
+    transactions,
+    savingsGoals,
     applied: {
       transactions: transactionPlan.writes.length,
       goals: goalPlan.writes.length,
       removed: transactionPlan.deletes.length + goalPlan.deletes.length,
       conflicts: [...transactionPlan.conflicts, ...goalPlan.conflicts],
     },
-    syncedAt: new Date().toISOString(),
+    syncedAt: now,
   });
 });
 

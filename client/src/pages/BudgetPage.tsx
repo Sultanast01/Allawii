@@ -1,42 +1,51 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useStore } from '../context/store';
+import { useStore, spentInCycleInKobo, cycleWindowOf, cycleDaysOf } from '../context/store';
 import Header from '../components/Header';
-import { formatNaira, daysUntil } from '../utils';
-import { AlertCircle, Check, RefreshCw, ChevronRight, TrendingDown } from 'lucide-react';
+import { formatNaira, koboToNaira, nairaToKobo } from '../utils';
+import { AlertCircle, Pencil, RefreshCw, ChevronRight } from 'lucide-react';
 
 export default function BudgetPage() {
   const navigate = useNavigate();
-  const { user, getSafeToSpend, getMonthlyAllowance, transactions, categoryBudgets, planUpdate, applyAdjustment, applyAllAdjustments, dismissPlanUpdate } = useStore();
-  const [showAll, setShowAll] = useState(false);
+  const { user, getSafeToSpend, getMonthlyAllowance, setMonthlyAllowance, transactions, categoryBudgets, planUpdate } = useStore();
+  const [editingAllowance, setEditingAllowance] = useState(false);
+  const [allowanceDraft, setAllowanceDraft] = useState('');
 
   const safe = getSafeToSpend();
   const allowance = getMonthlyAllowance();
-  const spent = transactions.filter(t => t.type === 'expense').reduce((s, t) => s + t.amountInKobo, 0);
-  const nextDate = user?.nextIncomeDate ? new Date(user.nextIncomeDate) : null;
-  const cycleStart = nextDate ? new Date(nextDate.getTime() - 30 * 86400000) : new Date();
+  const spent = spentInCycleInKobo(transactions, user);
+  const { nextIncome } = cycleWindowOf(user);
+  const cycleStart = nextIncome
+    ? new Date(nextIncome.getTime() - cycleDaysOf(user) * 86400000)
+    : new Date();
   const fmt = (d: Date) => d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
 
-  const stats = [
-    { label: 'Total allowance', value: formatNaira(allowance), color: 'text-navy-900' },
-    { label: 'Total spent', value: formatNaira(spent), color: 'text-navy-900' },
-    { label: 'Remaining', value: formatNaira(safe.unallocatedInKobo), color: 'text-emerald-700' },
-    { label: 'Next allowance', value: nextDate ? fmt(nextDate) : '—', color: 'text-navy-900' },
-  ];
+  const startAllowanceEdit = () => {
+    setAllowanceDraft(String(koboToNaira(allowance)));
+    setEditingAllowance(true);
+  };
 
-  const pendingAdjustments = planUpdate?.adjustments.filter(a => !a.applied) || [];
-  const allApplied = planUpdate && planUpdate.adjustments.every(a => a.applied);
+  const saveAllowance = async () => {
+    await setMonthlyAllowance(nairaToKobo(Number(allowanceDraft) || 0));
+    setEditingAllowance(false);
+  };
+
+  const stats = [
+    { label: 'Spent this cycle', value: formatNaira(spent), color: 'text-navy-900' },
+    { label: 'Remaining', value: formatNaira(safe.unallocatedInKobo), color: 'text-emerald-700' },
+    { label: 'Next allowance', value: nextIncome ? fmt(nextIncome) : '—', color: 'text-navy-900' },
+  ];
 
   return (
     <div>
-      <Header title="My Budget" showBack />
+      <Header title="My Budget" />
 
       <div className="px-5 pt-5 space-y-5 lg:px-10 lg:pt-10">
         {/* Header */}
         <div className="flex items-start justify-between">
           <div>
             <p className="text-[11px] font-semibold tracking-wider text-primary-600 uppercase mb-1">
-              Budget cycle · {fmt(cycleStart)}–{fmt(nextDate || new Date())}
+              Budget cycle · {fmt(cycleStart)}–{fmt(nextIncome || new Date())}
             </p>
             <h1 className="text-2xl font-bold text-navy-900 lg:text-3xl">Your plan is still within reach</h1>
             <p className="text-sm text-surface-500 mt-1 lg:text-base">Review your categories and adjust without starting over.</p>
@@ -48,6 +57,37 @@ export default function BudgetPage() {
 
         {/* Stats grid */}
         <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+          <div className="card p-4">
+            <p className="text-xs text-surface-500 mb-1">Total allowance</p>
+            {editingAllowance ? (
+              <div className="space-y-1.5">
+                <div className="flex items-center gap-1">
+                  <span className="text-sm font-bold text-surface-500">₦</span>
+                  <input
+                    autoFocus
+                    inputMode="decimal"
+                    aria-label="Total allowance in naira"
+                    value={allowanceDraft}
+                    onChange={e => setAllowanceDraft(e.target.value.replace(/[^0-9.]/g, ''))}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter') void saveAllowance();
+                      if (e.key === 'Escape') setEditingAllowance(false);
+                    }}
+                    className="w-full min-w-0 bg-transparent text-lg font-bold text-navy-900 outline-none"
+                  />
+                </div>
+                <div className="flex gap-2">
+                  <button onClick={() => void saveAllowance()} className="text-[11px] font-semibold text-primary-600">Save</button>
+                  <button onClick={() => setEditingAllowance(false)} className="text-[11px] font-semibold text-surface-500">Cancel</button>
+                </div>
+              </div>
+            ) : (
+              <button onClick={startAllowanceEdit} className="flex items-center gap-1.5 text-left group">
+                <p className="text-lg font-bold text-navy-900">{formatNaira(allowance)}</p>
+                <Pencil size={12} className="text-surface-400 group-hover:text-primary-600" />
+              </button>
+            )}
+          </div>
           {stats.map(s => (
             <div key={s.label} className="card p-4">
               <p className="text-xs text-surface-500 mb-1">{s.label}</p>
@@ -58,68 +98,16 @@ export default function BudgetPage() {
 
         {/* Plan Update */}
         {planUpdate?.triggered && (
-          <div className="bg-amber-50 border border-amber-200 rounded-2xl p-5">
-            <div className="flex items-center gap-2 mb-2">
-              <div className="w-7 h-7 bg-amber-400 rounded-full flex items-center justify-center">
-                <AlertCircle size={16} className="text-white" />
-              </div>
+          <button onClick={() => navigate('/adaptive')} className="w-full text-left bg-amber-50 border border-amber-200 rounded-2xl p-5 flex items-center gap-3">
+            <div className="w-7 h-7 bg-amber-400 rounded-full flex items-center justify-center shrink-0">
+              <AlertCircle size={16} className="text-white" />
+            </div>
+            <div className="flex-1 min-w-0">
               <p className="text-[11px] font-bold tracking-wider text-amber-700 uppercase">Plan update</p>
+              <p className="font-bold text-navy-900 text-sm mt-0.5 truncate">An unexpected expense changed your budget</p>
             </div>
-            <h3 className="font-bold text-navy-900 text-lg mb-1">An unexpected expense changed your budget</h3>
-            <p className="text-sm text-surface-600 mb-4">{planUpdate.message}</p>
-            {!showAll ? (
-              <button onClick={() => setShowAll(true)} className="btn-navy text-sm py-2.5 px-5 flex items-center gap-1.5">
-                Review suggestion <ChevronRight size={15} />
-              </button>
-            ) : (
-              <button onClick={() => setShowAll(false)} className="btn-secondary text-sm py-2.5 px-5">
-                Hide suggestions
-              </button>
-            )}
-          </div>
-        )}
-
-        {/* Suggested adjustments */}
-        {showAll && planUpdate && (
-          <div className="card p-5 animate-slide-up">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="font-bold text-navy-900">Suggested adjustments</h3>
-              <span className={`badge ${allApplied ? 'badge-success' : 'badge-warning'}`}>
-                {allApplied ? 'Applied' : 'Not applied'}
-              </span>
-            </div>
-            <div className="space-y-3">
-              {planUpdate.adjustments.map(adj => (
-                <div key={adj.id} className="flex items-center justify-between py-2 border-b border-surface-100 last:border-0">
-                  <div className="flex items-center gap-3">
-                    <div className="w-8 h-8 bg-surface-100 rounded-lg flex items-center justify-center">
-                      <TrendingDown size={15} className="text-surface-500" />
-                    </div>
-                    <div>
-                      <p className="text-sm font-semibold text-navy-900">{adj.category}</p>
-                      <p className="text-xs text-surface-500">
-                        <span className="line-through">{formatNaira(adj.currentInKobo)}</span> → <b className="text-navy-900">{formatNaira(adj.suggestedInKobo)}</b>
-                      </p>
-                    </div>
-                  </div>
-                  <div className="text-right">
-                    <p className="text-sm font-bold text-red-500">{formatNaira(adj.changeInKobo)}</p>
-                    {adj.applied ? (
-                      <span className="text-[10px] text-emerald-700 font-medium flex items-center gap-0.5 justify-end"><Check size={11} /> Applied</span>
-                    ) : (
-                      <button onClick={() => applyAdjustment(adj.id)} className="min-h-[44px] px-3 -mx-3 text-[11px] font-semibold text-primary-600 cursor-pointer">Apply</button>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
-            {!allApplied && (
-              <div className="flex gap-2 mt-4">
-                <button onClick={applyAllAdjustments} className="btn-primary flex-1 text-sm py-2.5">Apply all</button>
-                <button onClick={dismissPlanUpdate} className="btn-ghost text-sm">Dismiss</button>
-              </div>
-            )}
-          </div>
+            <ChevronRight size={16} className="text-amber-700 shrink-0" />
+          </button>
         )}
 
         {/* Category budgets */}
@@ -146,16 +134,15 @@ export default function BudgetPage() {
           </div>
         </div>
 
-        {/* Adaptive note */}
-        <div className="card p-4 flex gap-3 bg-primary-50/50 border-primary-100">
-          <RefreshCw size={18} className="text-primary-600 shrink-0 mt-0.5" />
-          <div>
+        {/* Adaptive budgeting */}
+        <button onClick={() => navigate('/adaptive')} className="card p-4 w-full flex items-center gap-3 text-left active:scale-[0.99] transition-transform">
+          <div className="w-10 h-10 bg-primary-50 rounded-xl flex items-center justify-center shrink-0"><RefreshCw size={17} className="text-primary-600" /></div>
+          <div className="flex-1">
             <p className="font-semibold text-sm text-navy-900">Adaptive budgeting</p>
-            <p className="text-xs text-surface-500 mt-0.5">
-              When you overspend or face an unexpected cost, Allawii recalculates your plan and suggests adjustments to other categories — so you recover instead of abandoning your budget.
-            </p>
+            <p className="text-xs text-surface-500">Recover from an unexpected expense without starting over</p>
           </div>
-        </div>
+          <ChevronRight size={16} className="text-surface-500" />
+        </button>
 
         {/* What-if */}
         <button onClick={() => navigate('/what-if')} className="card p-4 w-full flex items-center gap-3 text-left active:scale-[0.99] transition-transform">

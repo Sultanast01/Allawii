@@ -327,7 +327,7 @@ export default function KycVerificationPage() {
   if (loading) {
     return (
       <div>
-        <Header title="Verify identity" showBack />
+        <Header title="Verify identity" />
         <div className="px-5 pt-16 flex justify-center"><Loader2 size={26} className="text-primary-600 animate-spin" /></div>
       </div>
     );
@@ -336,7 +336,7 @@ export default function KycVerificationPage() {
   if (loadError) {
     return (
       <div>
-        <Header title="Verify identity" showBack />
+        <Header title="Verify identity" />
         <div className="px-5 pt-5">
           <div className="card p-6 text-center">
             <AlertTriangle size={28} className="text-amber-600 mx-auto mb-3" />
@@ -358,7 +358,7 @@ export default function KycVerificationPage() {
 
   return (
     <div>
-      <Header title="Verify identity" showBack />
+      <Header title="Verify identity" />
 
       <div className="px-5 pt-5 pb-8 space-y-4 lg:px-10 lg:max-w-2xl">
         <div>

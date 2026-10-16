@@ -28,7 +28,7 @@ export function prepareIncoming(rows: MergeRow[], now: string): MergeRow[] {
 
 /**
  * Last-write-wins merge that never deletes a row a client cannot see —
- * WhatsApp-recorded rows live on the server before the app has ever heard of them.
+ * Telegram-recorded rows live on the server before the app has ever heard of them.
  */
 export function planLedgerMerge(stored: MergeRow[], incoming: MergeRow[], deletedIds: string[]): MergePlan {
   const storedById = new Map(stored.map(row => [row.id, row]));

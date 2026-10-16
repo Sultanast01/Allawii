@@ -9,9 +9,9 @@ const router = Router();
 router.use(authMiddleware);
 
 /** Round-up settings: threshold, target wallet, enabled flag. */
-router.get('/settings', (req: Request, res: Response) => {
+router.get('/settings', async (req: Request, res: Response) => {
   const userId = (req as any).userId;
-  const settings = db.roundUpSettings.findByUser(userId);
+  const settings = await db.roundUpSettings.findByUser(userId);
   res.json(settings || {
     userId,
     enabled: false,
@@ -25,10 +25,10 @@ router.get('/settings', (req: Request, res: Response) => {
   });
 });
 
-router.put('/settings', (req: Request, res: Response) => {
+router.put('/settings', async (req: Request, res: Response) => {
   const userId = (req as any).userId;
   const { enabled, roundUpToInKobo, thresholdInKobo, targetGoalId, targetWalletAddress, fromCurrency, toCurrency } = req.body || {};
-  const settings = db.roundUpSettings.upsert(userId, {
+  const settings = await db.roundUpSettings.upsert(userId, {
     enabled: enabled ?? false,
     roundUpToInKobo: roundUpToInKobo ?? 5000,
     thresholdInKobo: thresholdInKobo ?? 50000,
@@ -41,9 +41,10 @@ router.put('/settings', (req: Request, res: Response) => {
 });
 
 /** Accrued spare change + recent ledger entries. */
-router.get('/status', (req: Request, res: Response) => {
+router.get('/status', async (req: Request, res: Response) => {
   const userId = (req as any).userId;
-  const settings = db.roundUpSettings.findByUser(userId) || {
+  const stored = await db.roundUpSettings.findByUser(userId);
+  const settings = stored || {
     userId,
     enabled: false,
     roundUpToInKobo: 5000,
@@ -53,7 +54,7 @@ router.get('/status', (req: Request, res: Response) => {
     fromCurrency: 'NGN',
     toCurrency: 'CNGN',
   };
-  const ledger = db.roundUpLedger.findByUser(userId).slice(0, 20);
+  const ledger = (await db.roundUpLedger.findByUser(userId)).slice(0, 20);
   const accrued = ledger
     .filter(e => e.status === 'accrued')
     .reduce((sum, e) => sum + (e.spareChangeInKobo || 0), 0);
@@ -69,18 +70,18 @@ router.get('/status', (req: Request, res: Response) => {
  * Calculate spare change from recent transactions.
  * For each expense, round up to the nearest `roundUpTo` and sum the differences.
  */
-router.post('/calculate', (req: Request, res: Response) => {
+router.post('/calculate', async (req: Request, res: Response) => {
   const userId = (req as any).userId;
-  const settings = db.roundUpSettings.findByUser(userId);
+  const settings = await db.roundUpSettings.findByUser(userId);
   if (!settings?.enabled) {
     return res.status(400).json({ error: 'Round-up is not enabled' });
   }
 
   const roundUpTo = settings.roundUpToInKobo || 5000;
-  const transactions = db.transactions.findByUser(userId, { type: 'expense', limit: 50 });
+  const transactions = await db.transactions.findByUser(userId, { type: 'expense', limit: 50 });
 
   const processedIds = new Set(
-    db.roundUpLedger.findByUser(userId).map(e => e.transactionId)
+    (await db.roundUpLedger.findByUser(userId)).map(e => e.transactionId)
   );
 
   const newEntries: any[] = [];
@@ -106,7 +107,7 @@ router.post('/calculate', (req: Request, res: Response) => {
         status: 'accrued',
         createdAt: new Date().toISOString(),
       };
-      db.roundUpLedger.create(entry);
+      await db.roundUpLedger.create(entry);
       newEntries.push(entry);
       totalSpare += entry.spareChangeInKobo;
     }
@@ -125,7 +126,7 @@ router.post('/calculate', (req: Request, res: Response) => {
  */
 router.post('/sweep', async (req: Request, res: Response) => {
   const userId = (req as any).userId;
-  const settings = db.roundUpSettings.findByUser(userId);
+  const settings = await db.roundUpSettings.findByUser(userId);
   if (!settings?.enabled) {
     return res.status(400).json({ error: 'Round-up is not enabled' });
   }
@@ -133,12 +134,12 @@ router.post('/sweep', async (req: Request, res: Response) => {
     return res.status(400).json({ error: 'No target wallet configured. Deploy a smart wallet first.' });
   }
 
-  const bmoniAccount = db.bmoniAccounts.findByUser(userId) as any;
+  const bmoniAccount = await db.bmoniAccounts.findByUser(userId) as any;
   if (!bmoniAccount?.bmoniUserId) {
     return res.status(400).json({ error: 'No B Moni identity linked. Connect via /bmoni/connect first.' });
   }
 
-  const ledger = db.roundUpLedger.findByUser(userId);
+  const ledger = await db.roundUpLedger.findByUser(userId);
   const accruedEntries = ledger.filter(e => e.status === 'accrued');
   const totalAccrued = accruedEntries.reduce((sum, e) => sum + (e.spareChangeInKobo || 0), 0);
 
@@ -173,7 +174,7 @@ router.post('/sweep', async (req: Request, res: Response) => {
     }
 
     for (const entry of accruedEntries) {
-      db.roundUpLedger.update(entry.id, userId, {
+      await db.roundUpLedger.update(entry.id, userId, {
         status: 'swept',
         sweptAt: new Date().toISOString(),
         quoteData: quoteResult.data,
@@ -181,7 +182,7 @@ router.post('/sweep', async (req: Request, res: Response) => {
       });
     }
 
-    db.roundUpSettings.upsert(userId, { lastSweepAt: new Date().toISOString() });
+    await db.roundUpSettings.upsert(userId, { lastSweepAt: new Date().toISOString() });
 
     res.json({
       success: true,

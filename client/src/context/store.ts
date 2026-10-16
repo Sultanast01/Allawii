@@ -4,7 +4,7 @@ import type { User, Transaction, SavingsGoal, Obligation, SpendingInsight, Savin
 import { DEFAULT_CATEGORIES } from '../types';
 import { generateId, daysUntil } from '../utils';
 import { apiPut, clearSession, login as apiLogin, register as apiRegister } from '../services/api';
-import { mergeLedger, pullLedger, pushLedger } from '../services/sync';
+import { keepGoalExtras, mergeLedger, pullLedger, pushLedger } from '../services/sync';
 
 export interface SuggestedAdjustment {
   id: string;
@@ -23,11 +23,14 @@ export interface PlanUpdate {
   adjustments: SuggestedAdjustment[];
 }
 
+/** The preset kinds keep autocomplete; anything else the user types is stored as-is. */
+export type CalendarEventType = 'income' | 'obligation' | 'goal' | 'group' | 'recurring' | (string & {});
+
 export interface CalendarEvent {
   id: string;
   title: string;
   date: string;
-  type: 'income' | 'obligation' | 'goal' | 'group' | 'recurring';
+  type: CalendarEventType;
   amountInKobo?: number;
   isCompleted: boolean;
 }
@@ -66,8 +69,8 @@ interface AppState {
   calendarEvents: CalendarEvent[];
   groups: Group[];
   textScale: 'normal' | 'large';
-  inflationRate: number;
   literacyCompleted: string[];
+  dismissedAlerts: string[];
   authPending: boolean;
   authError: string | null;
   profileSyncError: string | null;
@@ -106,17 +109,48 @@ interface AppState {
   getMonthlyAllowance: () => number;
   getStreak: () => StreakView;
   setTextScale: (scale: 'normal' | 'large') => void;
-  setInflationRate: (rate: number) => void;
   toggleLiteracyCompleted: (lessonId: string) => void;
   markInsightRead: (id: string) => void;
+  dismissAlert: (id: string) => void;
+  setMonthlyAllowance: (amountInKobo: number) => Promise<void>;
   resetAll: () => void;
 }
-
-export const DEFAULT_INFLATION = 15;
 
 const BUCKET_ORDER = ['enjoyment', 'future_you', 'essentials'] as const;
 
 const CYCLE_DAYS: Record<User['incomeFrequency'], number> = { daily: 1, weekly: 7, monthly: 30, irregular: 30 };
+
+export function cycleDaysOf(user: User | null): number {
+  return CYCLE_DAYS[user?.incomeFrequency || 'monthly'];
+}
+
+/** The cycle the allowance actually covers: the window that ends on the next income date. */
+export function cycleWindowOf(user: User | null): { startMs: number; nextIncome: Date | null } {
+  const cycleDays = cycleDaysOf(user);
+  const next = user?.nextIncomeDate ? new Date(user.nextIncomeDate) : null;
+  if (next && !Number.isNaN(next.getTime())) return { startMs: next.getTime() - cycleDays * 86400000, nextIncome: next };
+  const now = new Date();
+  return { startMs: new Date(now.getFullYear(), now.getMonth(), 1).getTime(), nextIncome: null };
+}
+
+export function spentInCycleInKobo(transactions: Transaction[], user: User | null): number {
+  const { startMs } = cycleWindowOf(user);
+  return transactions
+    .filter(t => t.type === 'expense' && (Number.isNaN(Date.parse(t.date)) || Date.parse(t.date) >= startMs))
+    .reduce((s, t) => s + t.amountInKobo, 0);
+}
+
+/**
+ * Money that landed starts a new cycle: the next income date is one cadence step after the
+ * collection date, so the plan keeps rolling instead of ageing backwards.
+ */
+function rollIncomeDate(user: User, incomeISO: string): User {
+  if (user.incomeFrequency === 'irregular') return user;
+  const collected = Date.parse(incomeISO);
+  if (Number.isNaN(collected)) return user;
+  const start = Math.max(collected, Date.now());
+  return { ...user, nextIncomeDate: new Date(start + cycleDaysOf(user) * 86400000).toISOString() };
+}
 
 export const SPLIT_PRESETS = {
   balanced: { label: 'Balanced', hint: 'Steady on the essentials, room for fun', essentials: 0.60, future_you: 0.20, enjoyment: 0.20 },
@@ -127,7 +161,7 @@ export const SPLIT_PRESETS = {
 export type SplitPreset = keyof typeof SPLIT_PRESETS;
 
 export const STREAK_MILESTONES = [
-  { days: 3, label: 'First steps', note: 'You saved on three separate days.' },
+  { days: 3, label: 'First steps', note: 'You showed up for your money on three separate days.' },
   { days: 7, label: 'Full week', note: 'Seven days in a row without skipping.' },
   { days: 14, label: 'Fortnight', note: 'Two weeks — the habit is settling in.' },
   { days: 30, label: 'One month', note: 'Thirty days of showing up.' },
@@ -230,6 +264,22 @@ function nameOf(categoryId: string): string {
   return DEFAULT_CATEGORIES.find(c => c.id === categoryId)?.name || categoryId;
 }
 
+/**
+ * Budget rows only store the allocation; spend is always re-derived from the current cycle
+ * in the ledger so a category bar can never show yesterday's number.
+ */
+function withLiveSpend(budgets: CategoryBudget[], transactions: Transaction[], user: User | null): CategoryBudget[] {
+  const { startMs } = cycleWindowOf(user);
+  const spent = new Map<string, number>();
+  for (const t of transactions) {
+    if (t.type !== 'expense') continue;
+    const at = Date.parse(t.date);
+    if (!Number.isNaN(at) && at < startMs) continue;
+    spent.set(t.category, (spent.get(t.category) ?? 0) + t.amountInKobo);
+  }
+  return budgets.map(cb => ({ ...cb, spentInKobo: spent.get(cb.id) ?? 0 }));
+}
+
 function buildBucket(bucket: Exclude<BudgetBucket, 'obligations'>, totalInKobo: number): CategoryBudget[] {
   const ids = BUCKET_CATEGORIES[bucket];
   const weights = BUCKET_WEIGHTS[bucket];
@@ -258,7 +308,7 @@ export function buildStarterPlan(plan: SetupPlan) {
   const ceiling = allowanceInKobo * 0.85;
   const scale = obligationTotal > ceiling ? ceiling / obligationTotal : 1;
   const obligationBudgets: CategoryBudget[] = rawObligations.map(o => ({
-    id: `ob-${generateId()}`,
+    id: o.category,
     name: o.name,
     allocatedInKobo: Math.round((o.cycleAmountInKobo * scale) / 5000) * 5000,
     spentInKobo: 0,
@@ -272,12 +322,19 @@ export function buildStarterPlan(plan: SetupPlan) {
     enjoyment: Math.round(remaining * ratios.enjoyment),
   };
 
-  const categoryBudgets = [
+  // The backend keys budget rows by category, so two obligations in one category share a single budget.
+  const byId = new Map<string, CategoryBudget>();
+  for (const cb of [
     ...obligationBudgets,
     ...buildBucket('essentials', bucketTotals.essentials),
     ...buildBucket('future_you', bucketTotals.future_you),
     ...buildBucket('enjoyment', bucketTotals.enjoyment),
-  ];
+  ]) {
+    const existing = byId.get(cb.id);
+    if (existing) existing.allocatedInKobo += cb.allocatedInKobo;
+    else byId.set(cb.id, { ...cb });
+  }
+  const categoryBudgets = [...byId.values()];
 
   const obligations: Obligation[] = plan.obligations.map((o, i) => ({
     id: generateId(),
@@ -324,9 +381,9 @@ export function buildStarterPlan(plan: SetupPlan) {
 function buildPlanUpdate(state: AppState, tx: Transaction): PlanUpdate | null {
   if (tx.type !== 'expense') return null;
   const income = state.transactions.filter(t => t.type === 'income').reduce((s, t) => s + t.amountInKobo, 0);
-  const allowance = income || state.user?.typicalIncomeInKobo || 0;
+  const allowance = state.user?.typicalIncomeInKobo || income;
   if (!allowance || state.categoryBudgets.length === 0) return null;
-  const spent = state.transactions.filter(t => t.type === 'expense').reduce((s, t) => s + t.amountInKobo, 0);
+  const spent = spentInCycleInKobo(state.transactions, state.user);
   const reserved = state.savingsGoals.filter(g => !g.isPaused).reduce((s, g) => s + g.contributionPerCycleInKobo, 0);
   const over = spent + reserved - allowance;
   if (over <= 0) return null;
@@ -380,12 +437,12 @@ const buildDemo = () => {
   ];
 
   const categoryBudgets: CategoryBudget[] = [
-    { id: 'cb1', name: 'Food', allocatedInKobo: 1500000, spentInKobo: 850000, bucket: 'essentials' },
-    { id: 'cb2', name: 'Transport', allocatedInKobo: 800000, spentInKobo: 400000, bucket: 'essentials' },
-    { id: 'cb3', name: 'Data & Airtime', allocatedInKobo: 500000, spentInKobo: 300000, bucket: 'essentials' },
-    { id: 'cb4', name: 'Personal', allocatedInKobo: 700000, spentInKobo: 300000, bucket: 'enjoyment' },
-    { id: 'cb5', name: 'Savings', allocatedInKobo: 500000, spentInKobo: 0, bucket: 'future_you' },
-    { id: 'cb6', name: 'Entertainment', allocatedInKobo: 500000, spentInKobo: 300000, bucket: 'enjoyment' },
+    { id: 'food', name: 'Food', allocatedInKobo: 1500000, spentInKobo: 0, bucket: 'essentials' },
+    { id: 'transport', name: 'Transport', allocatedInKobo: 800000, spentInKobo: 0, bucket: 'essentials' },
+    { id: 'data_airtime', name: 'Data & Airtime', allocatedInKobo: 500000, spentInKobo: 0, bucket: 'essentials' },
+    { id: 'shopping', name: 'Personal', allocatedInKobo: 700000, spentInKobo: 0, bucket: 'enjoyment' },
+    { id: 'savings', name: 'Savings', allocatedInKobo: 500000, spentInKobo: 0, bucket: 'future_you' },
+    { id: 'entertainment', name: 'Entertainment', allocatedInKobo: 500000, spentInKobo: 0, bucket: 'enjoyment' },
   ];
 
   const calendarEvents: CalendarEvent[] = [
@@ -448,8 +505,8 @@ export const useStore = create<AppState>()(
       calendarEvents: [],
       groups: [],
       textScale: 'normal',
-      inflationRate: DEFAULT_INFLATION,
       literacyCompleted: [],
+      dismissedAlerts: [],
       authPending: false,
       authError: null,
       profileSyncError: null,
@@ -517,12 +574,21 @@ export const useStore = create<AppState>()(
         try {
           const remote = await pullLedger();
           const mergedTx = mergeLedger(before.transactions, remote.transactions, before.deletedTransactionIds);
-          const mergedGoals = mergeLedger(before.savingsGoals, remote.savingsGoals, before.deletedGoalIds);
+          const mergedGoals = keepGoalExtras(
+            mergeLedger(before.savingsGoals, remote.savingsGoals, before.deletedGoalIds).rows,
+            before.savingsGoals,
+          );
+          const streakUnion = Array.from(new Set([...(before.streak.contributionDates || []), ...(remote.streakDates || [])]));
+          if (streakUnion.length !== (before.streak.contributionDates || []).length) {
+            set({ streak: { ...before.streak, contributionDates: streakUnion } });
+          }
           const pushed = await pushLedger({
             transactions: mergedTx.rows,
-            savingsGoals: mergedGoals.rows,
+            savingsGoals: mergedGoals,
             deletedTransactionIds: before.deletedTransactionIds,
             deletedGoalIds: before.deletedGoalIds,
+            categoryBudgets: get().categoryBudgets,
+            streakDates: streakUnion,
           });
           // Merge the server's answer back into whatever the user typed while the request was in flight.
           const live = get();
@@ -530,7 +596,8 @@ export const useStore = create<AppState>()(
           const adoptedGoals = mergeLedger(live.savingsGoals, pushed.savingsGoals, []);
           set({
             transactions: adoptedTx.rows,
-            savingsGoals: adoptedGoals.rows,
+            savingsGoals: keepGoalExtras(adoptedGoals.rows, live.savingsGoals),
+            categoryBudgets: withLiveSpend(live.categoryBudgets, adoptedTx.rows, live.user),
             deletedTransactionIds: live.deletedTransactionIds.filter(id => !pushed.transactions.some(t => t.id === id)),
             deletedGoalIds: live.deletedGoalIds.filter(id => !pushed.savingsGoals.some(g => g.id === id)),
             syncState: 'idle',
@@ -548,22 +615,25 @@ export const useStore = create<AppState>()(
       completeSetup: async (plan) => {
         const built = buildStarterPlan(plan);
         const nextIncomeDate = plan.nextIncomeDate || undefined;
-        set((state) => ({
-          user: state.user ? {
+        set((state) => {
+          const user = state.user ? {
             ...state.user,
             incomeFrequency: plan.incomeFrequency,
             typicalIncomeInKobo: Math.max(0, Math.round(plan.typicalIncomeInKobo)),
             university: plan.university || state.user.university,
             nextIncomeDate,
-          } : state.user,
-          categoryBudgets: built.categoryBudgets,
-          obligations: built.obligations,
-          calendarEvents: [
-            ...state.calendarEvents.filter(e => e.type !== 'obligation' && e.title !== 'Allowance / income expected'),
-            ...built.calendarEvents,
-          ],
-          profileSyncError: null,
-        }));
+          } : state.user;
+          return {
+            user,
+            categoryBudgets: withLiveSpend(built.categoryBudgets, state.transactions, user),
+            obligations: built.obligations,
+            calendarEvents: [
+              ...state.calendarEvents.filter(e => e.type !== 'obligation' && e.title !== 'Allowance / income expected'),
+              ...built.calendarEvents,
+            ],
+            profileSyncError: null,
+          };
+        });
         try {
           await apiPut('/auth/profile', {
             incomeFrequency: plan.incomeFrequency,
@@ -579,15 +649,17 @@ export const useStore = create<AppState>()(
       setDemoMode: (enabled) => {
         if (enabled) {
           const d = buildDemo();
+          const demoUser: User = {
+            id: 'demo', name: 'Ada', email: 'ada@allowii.app', university: 'University of Lagos',
+            incomeFrequency: 'monthly', typicalIncomeInKobo: 6000000, nextIncomeDate: d.nextIncome,
+            createdAt: new Date().toISOString(),
+          };
           set({
             isDemoMode: true,
             isAuthenticated: true,
-            user: {
-              id: 'demo', name: 'Ada', email: 'ada@allowii.app', university: 'University of Lagos',
-              incomeFrequency: 'monthly', typicalIncomeInKobo: 6000000, nextIncomeDate: d.nextIncome,
-              createdAt: new Date().toISOString(),
-            },
-            transactions: d.transactions, savingsGoals: d.savingsGoals, categoryBudgets: d.categoryBudgets,
+            user: demoUser,
+            transactions: d.transactions, savingsGoals: d.savingsGoals,
+            categoryBudgets: withLiveSpend(d.categoryBudgets, d.transactions, demoUser),
             calendarEvents: d.calendarEvents, groups: d.groups, planUpdate: d.planUpdate, insights: d.insights,
             streak: { currentStreak: 8, longestStreak: 21, lastContributionDate: new Date().toISOString(), contributionDates: d.contributionDates },
             obligations: [
@@ -595,26 +667,49 @@ export const useStore = create<AppState>()(
               { id: 'o2', userId: 'demo', name: 'Departmental Dues', amountInKobo: 300000, frequency: 'once', nextDueDate: new Date(Date.now() + 5 * 86400000).toISOString(), category: 'dues', isRecurring: false },
             ],
           });
+          // The Telegram assistant answers from the server profile, so demo cadence has to live there too.
+          void apiPut('/auth/profile', {
+            incomeFrequency: demoUser.incomeFrequency,
+            typicalIncomeInKobo: demoUser.typicalIncomeInKobo,
+            nextIncomeDate: demoUser.nextIncomeDate || null,
+          }).catch(() => {});
         } else {
           set({ isDemoMode: false });
         }
       },
 
-      addTransaction: (tx) => set((state) => {
-        const newTx: Transaction = {
-          ...tx, id: generateId(), syncStatus: 'pending', updatedAt: new Date().toISOString(),
-        } as Transaction;
-        const transactions = [newTx, ...state.transactions];
-        const planUpdate = buildPlanUpdate({ ...state, transactions }, newTx);
-        return planUpdate ? { transactions, planUpdate } : { transactions };
-      }),
+      addTransaction: (tx) => {
+        set((state) => {
+          const newTx: Transaction = {
+            ...tx, id: generateId(), syncStatus: 'pending', updatedAt: new Date().toISOString(),
+          } as Transaction;
+          const transactions = [newTx, ...state.transactions];
+          const categoryBudgets = withLiveSpend(state.categoryBudgets, transactions, state.user);
+          const planUpdate = buildPlanUpdate({ ...state, transactions, categoryBudgets }, newTx);
+          const user = tx.type === 'income' && state.user ? rollIncomeDate(state.user, tx.date) : state.user;
+          return {
+            ...(user !== state.user ? { user } : {}),
+            transactions,
+            categoryBudgets,
+            ...(planUpdate ? { planUpdate } : {}),
+          };
+        });
+        if (tx.type === 'income' && get().isAuthenticated && get().user?.nextIncomeDate) {
+          void apiPut('/auth/profile', { nextIncomeDate: get().user!.nextIncomeDate })
+            .catch(error => set({ profileSyncError: (error as Error).message }));
+        }
+      },
 
-      deleteTransaction: (id) => set((state) => ({
-        transactions: state.transactions.filter(t => t.id !== id),
-        deletedTransactionIds: state.deletedTransactionIds.includes(id)
-          ? state.deletedTransactionIds
-          : [...state.deletedTransactionIds, id],
-      })),
+      deleteTransaction: (id) => set((state) => {
+        const transactions = state.transactions.filter(t => t.id !== id);
+        return {
+          transactions,
+          categoryBudgets: withLiveSpend(state.categoryBudgets, transactions, state.user),
+          deletedTransactionIds: state.deletedTransactionIds.includes(id)
+            ? state.deletedTransactionIds
+            : [...state.deletedTransactionIds, id],
+        };
+      }),
 
       addSavingsGoal: (goal) => set((state) => ({
         savingsGoals: [...state.savingsGoals, {
@@ -632,13 +727,18 @@ export const useStore = create<AppState>()(
       })),
 
       addToSavingsGoal: (id, amountInKobo) => set((state) => {
+        const goal = state.savingsGoals.find(g => g.id === id);
+        if (!goal) return {};
+        const room = Math.max(0, goal.targetAmountInKobo - goal.currentAmountInKobo);
+        const contributed = Math.min(Math.max(0, Math.round(amountInKobo)), room);
+        if (contributed <= 0) return {};
         const today = dayKey(new Date());
         const dates = state.streak.contributionDates ?? [];
         const view = readStreak(dates.includes(today) ? dates : [...dates, today], state.streak.longestStreak);
         return {
           savingsGoals: state.savingsGoals.map(g => {
             if (g.id !== id) return g;
-            const newAmount = g.currentAmountInKobo + amountInKobo;
+            const newAmount = g.currentAmountInKobo + contributed;
             return {
               ...g,
               currentAmountInKobo: newAmount,
@@ -662,8 +762,10 @@ export const useStore = create<AppState>()(
         if (!state.planUpdate) return {};
         const adj = state.planUpdate.adjustments.find(a => a.id === id);
         if (!adj || adj.applied) return {};
-        const newBudgets = state.categoryBudgets.map(cb =>
-          cb.name === adj.category ? { ...cb, allocatedInKobo: adj.suggestedInKobo } : cb
+        const newBudgets = withLiveSpend(
+          state.categoryBudgets.map(cb => cb.name === adj.category ? { ...cb, allocatedInKobo: adj.suggestedInKobo } : cb),
+          state.transactions,
+          state.user,
         );
         return {
           categoryBudgets: newBudgets,
@@ -695,7 +797,7 @@ export const useStore = create<AppState>()(
       getSafeToSpend: () => {
         const state = get();
         const allowance = state.getMonthlyAllowance();
-        const spent = state.transactions.filter(t => t.type === 'expense').reduce((s, t) => s + t.amountInKobo, 0);
+        const spent = spentInCycleInKobo(state.transactions, state.user);
         const reservedSavings = state.savingsGoals.filter(g => !g.isPaused).reduce((s, g) => s + g.contributionPerCycleInKobo, 0);
         const remaining = Math.max(0, allowance - spent - reservedSavings);
         const daysLeft = state.user?.nextIncomeDate ? daysUntil(state.user.nextIncomeDate) : 30;
@@ -717,29 +819,60 @@ export const useStore = create<AppState>()(
 
       getMonthlyAllowance: () => {
         const state = get();
-        const income = state.transactions.filter(t => t.type === 'income').reduce((s, t) => s + t.amountInKobo, 0);
-        return income || state.user?.typicalIncomeInKobo || 0;
+        if (state.user?.typicalIncomeInKobo) return state.user.typicalIncomeInKobo;
+        return state.transactions.filter(t => t.type === 'income').reduce((s, t) => s + t.amountInKobo, 0);
+      },
+
+      setMonthlyAllowance: async (amountInKobo) => {
+        const rounded = Math.max(0, Math.round(amountInKobo));
+        const user = get().user;
+        if (user) set({ user: { ...user, typicalIncomeInKobo: rounded } });
+        try {
+          await apiPut('/auth/profile', { typicalIncomeInKobo: rounded });
+          set({ profileSyncError: null });
+        } catch (error) {
+          set({ profileSyncError: (error as Error).message });
+        }
       },
 
       setTextScale: (textScale) => set({ textScale }),
-      setInflationRate: (inflationRate) => set({ inflationRate: Math.min(60, Math.max(0, Math.round(inflationRate))) }),
 
       toggleLiteracyCompleted: (lessonId) => set((state) => {
-        const completed = state.literacyCompleted.includes(lessonId)
-          ? state.literacyCompleted.filter(id => id !== lessonId)
-          : [...state.literacyCompleted, lessonId];
-        return { literacyCompleted: completed };
+        const completing = !state.literacyCompleted.includes(lessonId);
+        const literacyCompleted = completing
+          ? [...state.literacyCompleted, lessonId]
+          : state.literacyCompleted.filter(id => id !== lessonId);
+        if (!completing) return { literacyCompleted };
+        // A lesson finished today is a day of showing up for your money, so it feeds the same streak.
+        const today = dayKey(new Date());
+        const dates = state.streak.contributionDates ?? [];
+        if (dates.includes(today)) return { literacyCompleted };
+        const view = readStreak([...dates, today], state.streak.longestStreak);
+        return {
+          literacyCompleted,
+          streak: {
+            currentStreak: view.current,
+            longestStreak: view.longest,
+            lastContributionDate: new Date().toISOString(),
+            contributionDates: view.dates,
+          },
+        };
       }),
 
       markInsightRead: (id) => set((state) => ({
         insights: state.insights.map(i => i.id === id ? { ...i, isRead: true } : i),
       })),
 
+      dismissAlert: (id) => set((state) => ({
+        dismissedAlerts: [...state.dismissedAlerts, id].slice(-200),
+      })),
+
       resetAll: () => set({
         user: null, isAuthenticated: false, isDemoMode: false, transactions: [], savingsGoals: [],
         obligations: [], categoryBudgets: [], insights: [], planUpdate: null,
         calendarEvents: [], groups: [],
-        inflationRate: DEFAULT_INFLATION, literacyCompleted: [],
+        literacyCompleted: [],
+        dismissedAlerts: [],
         deletedTransactionIds: [], deletedGoalIds: [], syncError: null, lastSyncedAt: null,
         streak: { currentStreak: 0, longestStreak: 0, contributionDates: [] },
       }),
@@ -749,7 +882,7 @@ export const useStore = create<AppState>()(
 );
 
 const SYNC_DEBOUNCE_MS = 1200;
-const SYNC_POLL_MS = 60000;
+const SYNC_POLL_MS = 20000;
 
 let syncTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -771,7 +904,7 @@ useStore.subscribe((state, prev) => {
   if (ledgerSignature(state) !== lastSyncedSignature) scheduleLedgerSync();
 });
 
-// A transaction typed into the WhatsApp bot cannot wake this tab, so an idle tab pulls on a timer.
+// A transaction typed into the Telegram bot cannot wake this tab, so an idle tab pulls on a timer.
 setInterval(() => {
   const state = useStore.getState();
   if (!state.isAuthenticated || state.syncState === 'syncing') return;

@@ -26,7 +26,7 @@ export default function OffersPage() {
 
   return (
     <>
-      <Header title="Student Offers" showBack />
+      <Header title="Student Offers" />
 
       <div className="px-5 py-4 space-y-4 pb-8 lg:px-10">
         <div className="card p-4 bg-navy-800 border-navy-800 flex items-start gap-3">

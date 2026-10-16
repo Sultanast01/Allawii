@@ -1,16 +1,12 @@
 import { Router, Request, Response } from 'express';
-import bcrypt from 'bcryptjs';
-import jwt from 'jsonwebtoken';
+import { supabaseAdmin, supabaseUser } from '../lib/supabase.js';
 import db from '../models/database.js';
-import { generateId } from '../utils/helpers.js';
 import { resolveBMoniAccount } from '../services/bmoni.js';
 
 const router = Router();
-const JWT_SECRET = process.env.JWT_SECRET || 'allowii-dev-secret';
 
-function signToken(userId: string, expiresIn: '30d' | '8h' | '7d' = '7d'): string {
-  return jwt.sign({ userId }, JWT_SECRET, { expiresIn });
-}
+const DEMO_EMAIL = 'ada.allowii@example.com';
+const DEMO_PASSWORD = process.env.DEMO_PASSWORD || 'allawii-demo';
 
 /** Accepts local (0801…), national (234801…) or E.164 input; null when unusable. */
 function normalizePhone(raw: unknown): string | null {
@@ -26,17 +22,60 @@ function normalizePhone(raw: unknown): string | null {
   return /^\+[1-9]\d{7,14}$/.test(e164) ? e164 : null;
 }
 
-export function authMiddleware(req: Request, res: Response, next: Function) {
+interface SessionBundle {
+  token: string;
+  refreshToken: string;
+  expiresIn: number;
+}
+
+function sessionBundle(session: { access_token: string; refresh_token: string; expires_in: number }): SessionBundle {
+  return { token: session.access_token, refreshToken: session.refresh_token, expiresIn: session.expires_in };
+}
+
+function publicUser(profile: any) {
+  if (!profile) return null;
+  return {
+    id: profile.id,
+    name: profile.name,
+    email: profile.email,
+    university: profile.university,
+    phoneNumber: profile.phoneNumber,
+    incomeFrequency: profile.incomeFrequency,
+    typicalIncomeInKobo: profile.typicalIncomeInKobo,
+    nextIncomeDate: profile.nextIncomeDate,
+  };
+}
+
+/** Verifies the Supabase access token and attaches the auth uid as req.userId. */
+export async function authMiddleware(req: Request, res: Response, next: (err?: unknown) => void) {
   const token = req.headers.authorization?.replace('Bearer ', '');
   if (!token) return res.status(401).json({ error: 'No token provided' });
   try {
-    const decoded = jwt.verify(token, JWT_SECRET) as { userId: string };
-    (req as any).userId = decoded.userId;
+    const { data, error } = await supabaseUser().auth.getUser(token);
+    if (error || !data.user) return res.status(401).json({ error: 'Invalid token' });
+    (req as any).userId = data.user.id;
     next();
   } catch {
     res.status(401).json({ error: 'Invalid token' });
   }
 }
+
+/** Exchange the stored refresh token for a fresh Supabase session when the access token expires. */
+router.post('/refresh', async (req: Request, res: Response) => {
+  const refreshToken = String(req.body?.refreshToken || '');
+  if (!refreshToken) return res.status(400).json({ error: 'refreshToken is required' });
+  try {
+    const { data, error } = await supabaseUser().auth.refreshSession({ refresh_token: refreshToken });
+    if (error || !data.session) return res.status(401).json({ error: 'Session expired' });
+    res.json({
+      ...sessionBundle(data.session),
+      user: publicUser(await db.users.findById(data.session.user.id)),
+    });
+  } catch (error) {
+    console.error('Refresh error:', error);
+    res.status(500).json({ error: 'Refresh failed' });
+  }
+});
 
 router.post('/register', async (req: Request, res: Response) => {
   try {
@@ -51,20 +90,43 @@ router.post('/register', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Password must be at least 8 characters' });
     }
 
-    const existing = db.users.find(email);
+    const existing = await db.users.find(String(email).toLowerCase());
     if (existing) return res.status(409).json({ error: 'Email already registered' });
 
     const normalizedPhone = normalizePhone(phoneNumber);
     if (String(phoneNumber || '').trim() && !normalizedPhone) {
       return res.status(400).json({ error: 'Enter a valid phone number, e.g. 08012345678 or +2348012345678' });
     }
-    if (normalizedPhone && db.load().users.some(u => u.phoneNumber === normalizedPhone)) {
+    if (normalizedPhone && await db.users.findByPhone(normalizedPhone)) {
       return res.status(409).json({ error: 'That number is already linked to another Allawii account.' });
     }
-    const passwordHash = await bcrypt.hash(password, 10);
-    const id = generateId();
-    const user = { id, name, email, passwordHash, university: university || null, phoneNumber: normalizedPhone, incomeFrequency: 'monthly', typicalIncomeInKobo: 0, nextIncomeDate: null, createdAt: new Date().toISOString() };
-    db.users.create(user);
+
+    const { data: created, error: createError } = await supabaseAdmin().auth.admin.createUser({
+      email,
+      password,
+      email_confirm: true,
+      user_metadata: { name },
+    });
+    if (createError || !created.user) {
+      if (/already been registered|exists/i.test(createError?.message || '')) {
+        return res.status(409).json({ error: 'Email already registered' });
+      }
+      console.error('Supabase createUser error:', createError?.message);
+      return res.status(500).json({ error: 'Registration failed' });
+    }
+
+    const id = created.user.id;
+    await db.users.create({
+      id,
+      name,
+      email: String(email).toLowerCase(),
+      university: university || null,
+      phoneNumber: normalizedPhone,
+      incomeFrequency: 'monthly',
+      typicalIncomeInKobo: 0,
+      nextIncomeDate: null,
+      createdAt: new Date().toISOString(),
+    });
 
     // Best-effort sandbox identity so wallet rails exist by first login — a
     // sandbox outage never blocks registration; the wallet page can link later.
@@ -78,8 +140,8 @@ router.post('/register', async (req: Request, res: Response) => {
         phoneNumber: normalizedPhone,
       });
       if (profile?.bmoniUserId) {
-        db.bmoniAccounts.create({
-          id: generateId(),
+        await db.bmoniAccounts.create({
+          id: crypto.randomUUID(),
           userId: id,
           bmoniUserId: profile.bmoniUserId,
           partnerUserId: profile.id || null,
@@ -90,11 +152,15 @@ router.post('/register', async (req: Request, res: Response) => {
       }
     }
 
-    const token = signToken(id);
+    const { data: session, error: sessionError } = await supabaseUser().auth.signInWithPassword({ email, password });
+    if (sessionError || !session.session) {
+      return res.status(500).json({ error: 'Registration succeeded but sign-in failed — please log in.' });
+    }
+
     res.status(201).json({
-      token,
+      ...sessionBundle(session.session),
       bmoniLinked,
-      user: { id, name, email, university, phoneNumber: normalizedPhone, incomeFrequency: user.incomeFrequency, typicalIncomeInKobo: user.typicalIncomeInKobo, nextIncomeDate: user.nextIncomeDate },
+      user: publicUser(await db.users.findById(id)),
     });
   } catch (error) {
     console.error('Register error:', error);
@@ -104,31 +170,31 @@ router.post('/register', async (req: Request, res: Response) => {
 
 router.post('/login', async (req: Request, res: Response) => {
   try {
-    const { email, password, remember } = req.body;
+    const { email, password } = req.body;
     if (!email || !password) {
       return res.status(400).json({ error: 'Email and password are required' });
     }
 
-    const user = db.users.find(email) as any;
-    if (!user) return res.status(401).json({ error: 'Invalid credentials' });
+    const { data, error } = await supabaseUser().auth.signInWithPassword({ email, password });
+    if (error || !data.session) return res.status(401).json({ error: 'Invalid credentials' });
 
-    const valid = await bcrypt.compare(password, user.passwordHash);
-    if (!valid) return res.status(401).json({ error: 'Invalid credentials' });
-
-    const token = signToken(user.id, remember ? '30d' : '8h');
-    res.json({
-      token,
-      user: {
-        id: user.id,
-        name: user.name,
-        email: user.email,
-        university: user.university,
-        phoneNumber: user.phoneNumber,
-        incomeFrequency: user.incomeFrequency,
-        typicalIncomeInKobo: user.typicalIncomeInKobo,
-        nextIncomeDate: user.nextIncomeDate,
-      },
-    });
+    let profile = await db.users.findById(data.session.user.id);
+    if (!profile) {
+      // Auth user without a profile row (e.g. created in the dashboard): bootstrap one.
+      profile = {
+        id: data.session.user.id,
+        name: data.session.user.user_metadata?.name || 'Student',
+        email: String(data.session.user.email || '').toLowerCase(),
+        university: null,
+        phoneNumber: null,
+        incomeFrequency: 'monthly',
+        typicalIncomeInKobo: 0,
+        nextIncomeDate: null,
+        createdAt: new Date().toISOString(),
+      };
+      await db.users.create(profile);
+    }
+    res.json({ ...sessionBundle(data.session), user: publicUser(profile) });
   } catch (error) {
     console.error('Login error:', error);
     res.status(500).json({ error: 'Login failed' });
@@ -136,41 +202,66 @@ router.post('/login', async (req: Request, res: Response) => {
 });
 
 /**
- * Issues a session for the synthetic demo persona so judges can exercise the
- * server-side B Moni sandbox proxy without registering. All data is fake.
+ * Issues a Supabase session for the synthetic demo persona so judges can exercise
+ * the whole stack without registering. All data is fake. The auth user is created
+ * on first use with the DEMO_PASSWORD from the server environment.
  */
-router.post('/demo-session', (req: Request, res: Response) => {
-  const existing = db.users.find('ada.allowii@example.com') as any;
-  if (existing) {
-    return res.json({ token: signToken(existing.id), user: { id: existing.id, name: existing.name, demo: true } });
+router.post('/demo-session', async (req: Request, res: Response) => {
+  try {
+    let { data, error } = await supabaseUser().auth.signInWithPassword({ email: DEMO_EMAIL, password: DEMO_PASSWORD });
+    if (error || !data.session) {
+      const { data: created, error: createError } = await supabaseAdmin().auth.admin.createUser({
+        email: DEMO_EMAIL,
+        password: DEMO_PASSWORD,
+        email_confirm: true,
+        user_metadata: { name: 'Ada' },
+      });
+      if (createError && !/already been registered/i.test(createError.message)) {
+        console.error('Demo user creation failed:', createError.message);
+        return res.status(500).json({ error: 'Demo session failed' });
+      }
+      if (created.user && !(await db.users.findById(created.user.id))) {
+        await db.users.create({
+          id: created.user.id,
+          name: 'Ada',
+          email: DEMO_EMAIL,
+          university: 'University of Lagos',
+          phoneNumber: '+2348023000001',
+          incomeFrequency: 'monthly',
+          typicalIncomeInKobo: 6000000,
+          nextIncomeDate: null,
+          isDemo: true,
+          createdAt: new Date().toISOString(),
+        });
+      }
+      const retry = await supabaseUser().auth.signInWithPassword({ email: DEMO_EMAIL, password: DEMO_PASSWORD });
+      if (retry.error || !retry.data.session) {
+        return res.status(500).json({ error: 'Demo session failed' });
+      }
+      data = retry.data;
+      error = retry.error;
+    }
+
+    const session = data.session!;
+    const profile = await db.users.findById(session.user.id);
+    if (profile && !profile.isDemo) await db.users.update(session.user.id, { isDemo: true });
+    res.json({
+      ...sessionBundle(session),
+      user: { ...(publicUser(profile) || {}), demo: true },
+    });
+  } catch (error) {
+    console.error('Demo session error:', error);
+    res.status(500).json({ error: 'Demo session failed' });
   }
-
-  const id = generateId();
-  db.users.create({
-    id,
-    name: 'Ada',
-    email: 'ada.allowii@example.com',
-    passwordHash: null,
-    university: 'University of Lagos',
-    phoneNumber: '+2348023000001',
-    incomeFrequency: 'monthly',
-    typicalIncomeInKobo: 6000000,
-    nextIncomeDate: null,
-    isDemo: true,
-    createdAt: new Date().toISOString(),
-  });
-
-  res.status(201).json({ token: signToken(id), user: { id, name: 'Ada', demo: true } });
 });
 
-router.get('/me', authMiddleware, (req: Request, res: Response) => {
-  const user = db.users.findById((req as any).userId) as any;
-  if (!user) return res.status(404).json({ error: 'User not found' });
-  const { passwordHash, ...safeUser } = user;
-  res.json(safeUser);
+router.get('/me', authMiddleware, async (req: Request, res: Response) => {
+  const profile = await db.users.findById((req as any).userId);
+  if (!profile) return res.status(404).json({ error: 'User not found' });
+  res.json(profile);
 });
 
-router.put('/profile', authMiddleware, (req: Request, res: Response) => {
+router.put('/profile', authMiddleware, async (req: Request, res: Response) => {
   const { incomeFrequency, typicalIncomeInKobo, nextIncomeDate, university, phoneNumber } = req.body;
   const updates: Record<string, unknown> = { incomeFrequency, typicalIncomeInKobo, nextIncomeDate, university };
   if (phoneNumber !== undefined) {
@@ -179,15 +270,16 @@ router.put('/profile', authMiddleware, (req: Request, res: Response) => {
       res.status(400).json({ error: 'Enter a valid phone number, e.g. 08012345678 or +2348012345678' });
       return;
     }
-    const owner = db.load().users.find(u => u.phoneNumber === normalized && u.id !== (req as any).userId);
-    if (owner) {
+    const owner = await db.users.findByPhone(normalized);
+    if (owner && owner.id !== (req as any).userId) {
       res.status(409).json({ error: 'That number is already linked to another Allawii account.' });
       return;
     }
     updates.phoneNumber = normalized;
   }
-  db.users.update((req as any).userId, updates);
-  res.json({ success: true, phoneNumber: db.users.findById((req as any).userId)?.phoneNumber || null });
+  await db.users.update((req as any).userId, updates);
+  const fresh = await db.users.findById((req as any).userId);
+  res.json({ success: true, phoneNumber: fresh?.phoneNumber || null });
 });
 
 export default router;

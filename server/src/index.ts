@@ -1,4 +1,5 @@
 import './env.js';
+import 'express-async-errors';
 import express from 'express';
 import cors from 'cors';
 
@@ -6,15 +7,14 @@ import authRoutes from './routes/auth.js';
 import transactionRoutes from './routes/transactions.js';
 import bmoniRoutes from './routes/bmoni.js';
 import roundUpRoutes from './routes/roundup.js';
-import whatsappRoutes from './routes/whatsapp.js';
+import botRoutes, { botUserRouter } from './routes/bot.js';
 import syncRoutes from './routes/sync.js';
+import { startTelegramBot } from './bot/index.js';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
 app.use(cors());
-// WhatsApp verifies the X-Hub-Signature-256 HMAC over the exact bytes Meta sent.
-app.use('/api/whatsapp/webhook', express.raw({ type: () => true }));
 app.use(express.json());
 
 app.get('/api/health', (_req, res) => {
@@ -25,7 +25,8 @@ app.use('/api/auth', authRoutes);
 app.use('/api/transactions', transactionRoutes);
 app.use('/api/bmoni', bmoniRoutes);
 app.use('/api/round-up', roundUpRoutes);
-app.use('/api/whatsapp', whatsappRoutes);
+app.use('/api/bot/user', botUserRouter);
+app.use('/api/bot', botRoutes);
 app.use('/api/sync', syncRoutes);
 
 app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
@@ -36,5 +37,7 @@ app.use((err: Error, _req: express.Request, res: express.Response, _next: expres
 app.listen(PORT, () => {
   console.log(`Allawii API running on http://localhost:${PORT}`);
   console.log(`B Moni sandbox: ${process.env.BMONI_BASE_URL || 'https://embedded-dev.bmoni.com'}`);
-  console.log(`WhatsApp webhook: ${process.env.WHATSAPP_APP_SECRET ? 'signature checks on' : 'needs WHATSAPP_APP_SECRET'} · outbound: ${process.env.WHATSAPP_TOKEN ? 'Meta Cloud API' : 'console only (no WHATSAPP_TOKEN)'}`);
+  console.log(`Supabase: ${process.env.SUPABASE_URL ? process.env.SUPABASE_URL : 'NOT CONFIGURED — set SUPABASE_URL + keys'}`);
+  console.log(`Bot HTTP API: ${process.env.BOT_API_KEY ? 'key required' : 'disabled (no BOT_API_KEY)'}`);
+  void startTelegramBot();
 });

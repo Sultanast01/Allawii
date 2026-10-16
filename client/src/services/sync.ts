@@ -14,7 +14,7 @@ function stampOf(row: SyncRow): number {
 }
 
 /**
- * The server holds rows the browser has never seen (a transaction typed into the WhatsApp bot),
+ * The server holds rows the browser has never seen (a transaction typed into the Telegram bot),
  * so the pull side of the merge adopts by id and only replaces a local row when the server's copy
  * was genuinely touched later.
  */
@@ -72,15 +72,33 @@ export function normalizeGoal(raw: Record<string, any>): SavingsGoal {
     currentAmountInKobo: Number(raw.currentAmountInKobo) || 0,
     contributionPerCycleInKobo: Number(raw.contributionPerCycleInKobo) || 0,
     contributionFrequency: ['daily', 'weekly', 'monthly'].includes(raw.contributionFrequency) ? raw.contributionFrequency : 'monthly',
+    savingsType: ['emergency', 'target', 'flexible'].includes(raw.savingsType) ? raw.savingsType : undefined,
+    withdrawalDate: raw.withdrawalDate || undefined,
     progress: Number(raw.progress) || 0,
     isPaused: Boolean(raw.isPaused),
     createdAt: raw.createdAt || new Date().toISOString(),
   } as SavingsGoal;
 }
 
+/**
+ * A project whose savings_goals table has not gained `savings_type` and `withdrawal_date` yet
+ * answers for those fields with nothing, and last-write-wins would then reset a pot the user has
+ * just labelled. Keep the local answer wherever the server has none.
+ */
+export function keepGoalExtras(remote: SavingsGoal[], local: SavingsGoal[]): SavingsGoal[] {
+  const localById = new Map(local.map(goal => [goal.id, goal]));
+  return remote.map(goal => {
+    const mine = localById.get(goal.id);
+    if (!mine || (goal.savingsType && goal.withdrawalDate)) return goal;
+    return { ...goal, savingsType: goal.savingsType || mine.savingsType, withdrawalDate: goal.withdrawalDate || mine.withdrawalDate };
+  });
+}
+
 export interface RemoteState {
   transactions: Transaction[];
   savingsGoals: SavingsGoal[];
+  categoryBudgets?: Record<string, any>[];
+  streakDates?: string[];
   syncedAt: string;
 }
 
@@ -89,6 +107,8 @@ export async function pullLedger(): Promise<RemoteState> {
   return {
     transactions: (data.transactions || []).map(normalizeTransaction),
     savingsGoals: (data.savingsGoals || []).map(normalizeGoal),
+    categoryBudgets: data.categoryBudgets || [],
+    streakDates: Array.isArray(data.streakDates) ? data.streakDates : [],
     syncedAt: data.syncedAt,
   };
 }
@@ -102,6 +122,8 @@ export async function pushLedger(payload: {
   savingsGoals: SavingsGoal[];
   deletedTransactionIds: string[];
   deletedGoalIds: string[];
+  categoryBudgets?: unknown[];
+  streakDates?: string[];
 }): Promise<PushResult> {
   const data = await apiPut('/sync/state', payload);
   return {

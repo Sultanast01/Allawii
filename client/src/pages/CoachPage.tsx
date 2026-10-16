@@ -1,50 +1,59 @@
-import { useState, useRef, useEffect } from 'react';
-import { useStore } from '../context/store';
+import { useMemo, useRef, useState, useEffect } from 'react';
+import { useStore, spentInCycleInKobo, cycleDaysOf, cycleWindowOf } from '../context/store';
 import Header from '../components/Header';
 import { formatNaira } from '../utils';
+import { answerCoach, coachChips, type CoachData } from '../utils/coach';
 import { Send, Sparkles } from 'lucide-react';
 
 interface Message { id: string; role: 'user' | 'assistant'; content: string; sub?: string; }
 
-const generateResponse = (q: string): { content: string; sub?: string } => {
-  const store = useStore.getState();
-  const safe = store.getSafeToSpend();
-  const name = store.user?.name || 'there';
-  const lower = q.toLowerCase();
+const BUDGET_BUCKETS = ['obligations', 'essentials'];
 
-  if (lower.includes('last') || lower.includes('allowance')) {
-    return { content: `Based on your ${formatNaira(safe.unallocatedInKobo)} remaining and ${safe.daysUntilNextIncome} days to your next allowance, you’re on track if you keep daily spending near ${formatNaira(safe.dailyLimitInKobo)}.`, sub: `If you spend more than ${formatNaira(safe.dailyLimitInKobo)} most days, you could run short around ${safe.daysUntilNextIncome > 5 ? 'the end of the cycle' : 'in a few days'}. Want me to suggest a plan?` };
+/** Every answer is built from what the app already knows, so the guidance stays personal. */
+function coachDataFrom(state: ReturnType<typeof useStore.getState>): CoachData {
+  const safe = state.getSafeToSpend();
+  const frequency = state.user?.incomeFrequency || 'monthly';
+  const cycleDays = cycleDaysOf(state.user);
+  const { startMs } = cycleWindowOf(state.user);
+  const byCategory = new Map<string, number>();
+  for (const tx of state.transactions) {
+    if (tx.type !== 'expense') continue;
+    const at = Date.parse(tx.date);
+    if (!Number.isNaN(at) && at < startMs) continue;
+    byCategory.set(tx.category, (byCategory.get(tx.category) || 0) + tx.amountInKobo);
   }
-  if (lower.includes('spending most') || lower.includes('where am i') || lower.includes('where is my money')) {
-    const byCat: Record<string, number> = {};
-    store.transactions.filter(t => t.type === 'expense').forEach(t => { byCat[t.category] = (byCat[t.category] || 0) + t.amountInKobo; });
-    const sorted = Object.entries(byCat).sort((a, b) => b[1] - a[1]).slice(0, 3);
-    return { content: sorted.length ? `Your biggest spending areas: ${sorted.map(([c, a]) => `${c.replace('_', ' ')} (${formatNaira(a)})`).join(', ')}.` : 'You haven’t recorded many expenses yet — that’s a clean slate!', sub: 'Want tips to bring any of these down?' };
-  }
-  if (lower.includes('afford') || lower.includes('can i')) {
-    const m = q.match(/[\d,]+/); const amt = m ? Number(m[0].replace(',', '')) : 0;
-    if (amt > 0) {
-      return amt <= safe.unallocatedInKobo
-        ? { content: `Yes — ${formatNaira(amt)} fits within your ${formatNaira(safe.unallocatedInKobo)} safe-to-spend.`, sub: `After it, your daily limit drops to about ${formatNaira(Math.max(0, (safe.unallocatedInKobo - amt) / Math.max(1, safe.daysUntilNextIncome)))}/day.` }
-        : { content: `Not yet. ${formatNaira(amt)} is more than your ${formatNaira(safe.unallocatedInKobo)} safe-to-spend.`, sub: 'You could wait, trim another category, or pause a savings contribution. Try the what-if simulator to see the trade-offs.' };
-    }
-    return { content: 'Tell me the price and I’ll check it against your budget — for example, “Can I afford ₦8,000?”' };
-  }
-  if (lower.includes('save') || lower.includes('goal')) {
-    const g = store.savingsGoals;
-    return { content: g.length ? `You have ${g.length} goal${g.length > 1 ? 's' : ''}: ${g.map(x => `${x.name} (${Math.round(x.progress)}%)`).join(', ')}.` : 'You don’t have a savings goal yet.', sub: `Even ${formatNaira(Math.max(500, Math.round(safe.dailyLimitInKobo * 0.2 / 100) * 100))}/week builds a real buffer. Want help setting one up?` };
-  }
-  if (lower.includes('hello') || lower.includes('hi') || lower.includes('hey')) {
-    return { content: `Hi ${name}. What would you like to figure out today?`, sub: 'I can check if your allowance will last, explain where your money goes, or test a purchase.' };
-  }
-  return { content: `Here’s where you stand: ${formatNaira(safe.unallocatedInKobo)} safe to spend, ${formatNaira(safe.dailyLimitInKobo)}/day for ${safe.daysUntilNextIncome} days.`, sub: 'Ask me about affording something, saving more, or what happens if your allowance is late.' };
-};
+  const plannedBasics = state.categoryBudgets
+    .filter(cb => BUDGET_BUCKETS.includes(cb.bucket))
+    .reduce((sum, cb) => sum + cb.allocatedInKobo, 0);
+
+  return {
+    name: state.user?.name || 'there',
+    cycleLabel: frequency === 'daily' ? 'day' : frequency === 'weekly' ? 'week' : 'month',
+    allowanceInKobo: state.getMonthlyAllowance(),
+    safeToSpendInKobo: safe.unallocatedInKobo,
+    dailyLimitInKobo: safe.dailyLimitInKobo,
+    daysLeft: safe.daysUntilNextIncome,
+    spentInKobo: spentInCycleInKobo(state.transactions, state.user),
+    essentialsInKobo: Math.round(plannedBasics * (30.4 / cycleDays)),
+    goalCount: state.savingsGoals.length,
+    goalGapInKobo: state.savingsGoals.reduce((sum, g) => sum + Math.max(0, g.targetAmountInKobo - g.currentAmountInKobo), 0),
+    topCategories: [...byCategory.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5),
+    hasDebtSpending: state.transactions.some(t => t.category === 'debt' || /loan|owe|borrow|debt|advance/i.test(t.description)),
+    entryCount: state.transactions.length,
+  };
+}
 
 export default function CoachPage() {
-  const { user, getSafeToSpend } = useStore();
-  const safe = getSafeToSpend();
+  const state = useStore();
+  const safe = state.getSafeToSpend();
+  const data = useMemo(() => coachDataFrom(useStore.getState()), [state.transactions, state.savingsGoals, state.categoryBudgets, state.user]);
   const [messages, setMessages] = useState<Message[]>([
-    { id: 'w', role: 'assistant', content: `Hi ${user?.name || 'there'}. What would you like to figure out today?`, sub: 'Suggestions use your recorded allowance, budget, and transactions.' },
+    {
+      id: 'w',
+      role: 'assistant',
+      content: `Hi ${data.name}. I am your money coach — ask me anything about budgeting, not just your numbers.`,
+      sub: 'Emergency funds, the 50/30/20 rule, which debt to clear first, food and transport costs, saving faster, school fees, group contributions, or what to do when your money arrives late.',
+    },
   ]);
   const [input, setInput] = useState('');
   const [typing, setTyping] = useState(false);
@@ -53,21 +62,23 @@ export default function CoachPage() {
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages, typing]);
 
   const send = (text: string) => {
-    if (!text.trim()) return;
-    setMessages(prev => [...prev, { id: Date.now().toString(), role: 'user', content: text }]);
+    const question = text.trim();
+    if (!question) return;
+    setMessages(prev => [...prev, { id: Date.now().toString(), role: 'user', content: question }]);
     setInput(''); setTyping(true);
     setTimeout(() => {
-      const r = generateResponse(text);
-      setMessages(prev => [...prev, { id: (Date.now() + 1).toString(), role: 'assistant', ...r }]);
+      const answer = answerCoach(question, coachDataFrom(useStore.getState()));
+      setMessages(prev => [...prev, { id: (Date.now() + 1).toString(), role: 'assistant', ...answer }]);
       setTyping(false);
-    }, 700 + Math.random() * 900);
+    }, 500 + Math.random() * 700);
   };
 
-  const chips = ['Will my allowance last?', 'Where am I spending most?', 'Help me save more', 'Can I afford ₦8,000?'];
+  const asked = new Set(messages.filter(m => m.role === 'user').map(m => m.content));
+  const chips = coachChips(data, asked);
 
   return (
     <div className="flex flex-col h-dvh">
-      <Header title="AI Money Coach" showBack />
+      <Header title="AI Money Coach" />
 
       <div className="flex-1 overflow-y-auto px-5 pt-5 pb-4 lg:px-10">
         <div className="mx-auto w-full max-w-md lg:max-w-[1120px]">

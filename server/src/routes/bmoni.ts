@@ -64,7 +64,7 @@ function kycDocRoute(
     },
     async (req: Request, res: Response) => {
       const userId = (req as any).userId;
-      const account = db.bmoniAccounts.findByUser(userId) as any;
+      const account = await db.bmoniAccounts.findByUser(userId) as any;
       if (!account?.bmoniUserId) return res.status(404).json({ error: 'No sandbox identity linked yet' });
 
       const fields = {
@@ -102,7 +102,7 @@ router.use(authMiddleware);
 /** Provision a real sandbox identity for the signed-in Allawii user. */
 router.post('/connect', async (req: Request, res: Response) => {
   const userId = (req as any).userId;
-  const existing = db.bmoniAccounts.findByUser(userId) as any;
+  const existing = await db.bmoniAccounts.findByUser(userId) as any;
   if (existing?.bmoniUserId) {
     const profile = await getBMoniUser(existing.bmoniUserId);
     return res.json({
@@ -112,7 +112,7 @@ router.post('/connect', async (req: Request, res: Response) => {
     });
   }
 
-  const localUser = db.users.findById(userId) as any;
+  const localUser = await db.users.findById(userId) as any;
   const { firstName, lastName, email, phoneNumber } = req.body || {};
 
   const fullName = String(localUser?.name || 'Allawii Student').trim().split(' ');
@@ -137,7 +137,7 @@ router.post('/connect', async (req: Request, res: Response) => {
     profile: created,
     createdAt: new Date().toISOString(),
   };
-  db.bmoniAccounts.create(account);
+  await db.bmoniAccounts.create(account);
 
   res.status(201).json({
     alreadyConnected: false,
@@ -150,7 +150,7 @@ router.post('/connect', async (req: Request, res: Response) => {
 /** Sandbox identity plus live KYC / onboarding / currency state. */
 router.get('/status', async (req: Request, res: Response) => {
   const userId = (req as any).userId;
-  const account = db.bmoniAccounts.findByUser(userId) as any;
+  const account = await db.bmoniAccounts.findByUser(userId) as any;
   if (!account?.bmoniUserId) {
     return res.status(404).json({ error: 'No sandbox identity linked yet' });
   }
@@ -178,7 +178,7 @@ router.get('/status', async (req: Request, res: Response) => {
 /** Patch the sandbox KYC record (identity + address) for the linked B Moni user. */
 router.patch('/kyc', async (req: Request, res: Response) => {
   const userId = (req as any).userId;
-  const account = db.bmoniAccounts.findByUser(userId) as any;
+  const account = await db.bmoniAccounts.findByUser(userId) as any;
   if (!account?.bmoniUserId) return res.status(404).json({ error: 'No sandbox identity linked yet' });
 
   const result = await submitKyc(account.bmoniUserId, req.body ?? {});
@@ -189,7 +189,7 @@ router.patch('/kyc', async (req: Request, res: Response) => {
 /** Activate KYC once identity, address and documents are complete. */
 router.post('/kyc/activate', async (req: Request, res: Response) => {
   const userId = (req as any).userId;
-  const account = db.bmoniAccounts.findByUser(userId) as any;
+  const account = await db.bmoniAccounts.findByUser(userId) as any;
   if (!account?.bmoniUserId) return res.status(404).json({ error: 'No sandbox identity linked yet' });
 
   const result = await activateKyc(account.bmoniUserId, req.body ?? {});
@@ -200,7 +200,7 @@ router.post('/kyc/activate', async (req: Request, res: Response) => {
 /** Document-type enums and other KYC field options from the sandbox. */
 router.get('/kyc/options', async (req: Request, res: Response) => {
   const userId = (req as any).userId;
-  const account = db.bmoniAccounts.findByUser(userId) as any;
+  const account = await db.bmoniAccounts.findByUser(userId) as any;
   if (!account?.bmoniUserId) return res.status(404).json({ error: 'No sandbox identity linked yet' });
 
   const result = await getKycOptions(account.bmoniUserId);
@@ -211,7 +211,7 @@ router.get('/kyc/options', async (req: Request, res: Response) => {
 /** Occupation list (numeric socCodes) for the KYC employment section. */
 router.get('/kyc/occupations', async (req: Request, res: Response) => {
   const userId = (req as any).userId;
-  const account = db.bmoniAccounts.findByUser(userId) as any;
+  const account = await db.bmoniAccounts.findByUser(userId) as any;
   if (!account?.bmoniUserId) return res.status(404).json({ error: 'No sandbox identity linked yet' });
 
   const result = await listKycOccupations(account.bmoniUserId);
@@ -222,7 +222,7 @@ router.get('/kyc/occupations', async (req: Request, res: Response) => {
 /** Reviewer verdict for the submitted KYC package: pending / approved / action_required. */
 router.get('/kyc/status', async (req: Request, res: Response) => {
   const userId = (req as any).userId;
-  const account = db.bmoniAccounts.findByUser(userId) as any;
+  const account = await db.bmoniAccounts.findByUser(userId) as any;
   if (!account?.bmoniUserId) return res.status(404).json({ error: 'No sandbox identity linked yet' });
 
   const result = await getKycStatus(account.bmoniUserId);
@@ -233,7 +233,7 @@ router.get('/kyc/status', async (req: Request, res: Response) => {
 /** Ask the reviewer to look again after re-uploading a rejected document. */
 router.post('/kyc/retry', async (req: Request, res: Response) => {
   const userId = (req as any).userId;
-  const account = db.bmoniAccounts.findByUser(userId) as any;
+  const account = await db.bmoniAccounts.findByUser(userId) as any;
   if (!account?.bmoniUserId) return res.status(404).json({ error: 'No sandbox identity linked yet' });
 
   const result = await retryKycReview(account.bmoniUserId, String((req.body as any)?.sumsubLevelName ?? 'id-and-liveness'));
@@ -253,7 +253,7 @@ router.post('/kyc/documents/biometric', ...kycDocRoute('biometric', 'selfie', 1)
 /** Start Anchor/Nigeria onboarding — the step that issues the user's own NUBAN. */
 router.post('/onboarding/nigeria', async (req: Request, res: Response) => {
   const userId = (req as any).userId;
-  const account = db.bmoniAccounts.findByUser(userId) as any;
+  const account = await db.bmoniAccounts.findByUser(userId) as any;
   if (!account?.bmoniUserId) return res.status(404).json({ error: 'No sandbox identity linked yet' });
 
   const bvn = String((req.body as any)?.bvn ?? '').trim();
@@ -275,7 +275,7 @@ router.post('/onboarding/nigeria', async (req: Request, res: Response) => {
 /** Live smart-wallet balances across supported currencies. */
 router.get('/balances', async (req: Request, res: Response) => {
   const userId = (req as any).userId;
-  const account = db.bmoniAccounts.findByUser(userId) as any;
+  const account = await db.bmoniAccounts.findByUser(userId) as any;
   if (!account?.bmoniUserId) return res.status(404).json({ error: 'No sandbox identity linked yet' });
 
   const result = await getWalletBalances(account.bmoniUserId);
@@ -293,7 +293,7 @@ router.get('/balances', async (req: Request, res: Response) => {
 /** Where money can be sent in: activation VBA before KYC, personal NUBAN after. */
 router.get('/deposit-accounts', async (req: Request, res: Response) => {
   const userId = (req as any).userId;
-  const account = db.bmoniAccounts.findByUser(userId) as any;
+  const account = await db.bmoniAccounts.findByUser(userId) as any;
   if (!account?.bmoniUserId) return res.status(404).json({ error: 'No sandbox identity linked yet' });
 
   const result = await getDepositAccounts(account.bmoniUserId);
@@ -304,7 +304,7 @@ router.get('/deposit-accounts', async (req: Request, res: Response) => {
 /** Live NGN rate — powers inflation-aware goal views. */
 router.get('/rate', async (req: Request, res: Response) => {
   const userId = (req as any).userId;
-  const account = db.bmoniAccounts.findByUser(userId) as any;
+  const account = await db.bmoniAccounts.findByUser(userId) as any;
   if (!account?.bmoniUserId) return res.status(404).json({ error: 'No sandbox identity linked yet' });
 
   const to = String(req.query.to || 'USD').toUpperCase();
@@ -316,7 +316,7 @@ router.get('/rate', async (req: Request, res: Response) => {
 /** Real B Moni list of Nigerian banks (CBN codes). */
 router.get('/banks', async (req: Request, res: Response) => {
   const userId = (req as any).userId;
-  const account = db.bmoniAccounts.findByUser(userId) as any;
+  const account = await db.bmoniAccounts.findByUser(userId) as any;
   if (!account?.bmoniUserId) return res.status(404).json({ error: 'No sandbox identity linked yet' });
 
   const banks = await listNigerianBanks(account.bmoniUserId);
@@ -327,7 +327,7 @@ router.get('/banks', async (req: Request, res: Response) => {
 /** Resolve the registered name on a NUBAN before paying anyone. */
 router.post('/verify-account', async (req: Request, res: Response) => {
   const userId = (req as any).userId;
-  const account = db.bmoniAccounts.findByUser(userId) as any;
+  const account = await db.bmoniAccounts.findByUser(userId) as any;
   if (!account?.bmoniUserId) return res.status(404).json({ error: 'No sandbox identity linked yet' });
 
   const bankCode = String(req.body?.bankCode || '').trim();
@@ -350,7 +350,7 @@ router.post('/verify-account', async (req: Request, res: Response) => {
  */
 router.post('/wallet/challenge', async (req: Request, res: Response) => {
   const userId = (req as any).userId;
-  const account = db.bmoniAccounts.findByUser(userId) as any;
+  const account = await db.bmoniAccounts.findByUser(userId) as any;
   if (!account?.bmoniUserId) return res.status(404).json({ error: 'No sandbox identity linked yet' });
 
   const currency = String(req.body?.currency || 'CNGN').toUpperCase();
@@ -370,7 +370,7 @@ router.post('/wallet/challenge', async (req: Request, res: Response) => {
  */
 router.post('/wallet/deploy', async (req: Request, res: Response) => {
   const userId = (req as any).userId;
-  const account = db.bmoniAccounts.findByUser(userId) as any;
+  const account = await db.bmoniAccounts.findByUser(userId) as any;
   if (!account?.bmoniUserId) return res.status(404).json({ error: 'No sandbox identity linked yet' });
 
   const { currency, userOwnerAddress, signature, challengeId } = req.body || {};

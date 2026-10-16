@@ -1,17 +1,50 @@
 import { useMemo, useState, useEffect } from 'react';
 import { useStore, STREAK_MILESTONES } from '../context/store';
 import Header from '../components/Header';
-import { formatNaira, formatDateShort, nairaToKobo } from '../utils';
-import { Plus, Minus, Percent, Wifi, Cloud, Flame, Sparkles, Pause, Play, Trash2, ChevronRight, ArrowUpCircle, RefreshCw, Settings } from 'lucide-react';
+import { formatNaira, formatDateShort, nairaToKobo, koboToNaira } from '../utils';
+import type { SavingsGoal, SavingsType } from '../types';
+import { Plus, Minus, Wifi, Cloud, Flame, Sparkles, Pause, Play, Trash2, ChevronRight, ArrowUpCircle, RefreshCw, Settings } from 'lucide-react';
 import { roundUp } from '../services/api';
 
+const SAVINGS_TYPE_OPTIONS: { value: SavingsType; label: string; caption: string }[] = [
+  { value: 'target', label: 'Goal', caption: 'Saved toward one thing, by one date.' },
+  { value: 'emergency', label: 'Emergency fund', caption: 'Kept for when something breaks. Don\'t plan to spend it.' },
+  { value: 'flexible', label: 'Flexible pot', caption: 'No deadline. Take it out whenever you need to.' },
+];
+
+const savingsTypeLabel = (value?: SavingsType) =>
+  SAVINGS_TYPE_OPTIONS.find(option => option.value === value)?.label ?? 'Goal';
+
+function SavingsTypePicker({ value, onChange }: { value: SavingsType; onChange: (value: SavingsType) => void }) {
+  const caption = SAVINGS_TYPE_OPTIONS.find(option => option.value === value)?.caption;
+  return (
+    <div>
+      <div className="flex rounded-xl bg-surface-100 p-1">
+        {SAVINGS_TYPE_OPTIONS.map(option => (
+          <button
+            key={option.value}
+            type="button"
+            onClick={() => onChange(option.value)}
+            className={`flex-1 rounded-lg py-1.5 text-xs font-semibold transition-colors ${value === option.value ? 'bg-white text-navy-900 shadow-sm' : 'text-surface-500'}`}
+          >
+            {option.label}
+          </button>
+        ))}
+      </div>
+      {caption && <p className="text-[11px] text-surface-500 mt-1.5">{caption}</p>}
+    </div>
+  );
+}
+
 export default function SavingsPage() {
-  const { savingsGoals, getStreak, inflationRate, setInflationRate, addSavingsGoal, addToSavingsGoal, updateSavingsGoal, deleteSavingsGoal } = useStore();
+  const { savingsGoals, getStreak, addSavingsGoal, addToSavingsGoal, updateSavingsGoal, deleteSavingsGoal } = useStore();
   const streakView = getStreak();
   const [showAdd, setShowAdd] = useState(false);
   const [contributeId, setContributeId] = useState<string | null>(null);
   const [amount, setAmount] = useState('');
-  const [form, setForm] = useState({ name: '', targetAmount: '', contributionPerCycle: '', targetDate: '' });
+  const [form, setForm] = useState({ name: '', targetAmount: '', contributionPerCycle: '', targetDate: '', savingsType: 'target' as SavingsType, withdrawalDate: '' });
+  const [editId, setEditId] = useState<string | null>(null);
+  const [editForm, setEditForm] = useState({ name: '', targetAmount: '', contributionPerCycle: '', targetDate: '', savingsType: 'target' as SavingsType, withdrawalDate: '' });
 
   const [roundUpEnabled, setRoundUpEnabled] = useState(false);
   const [roundUpTo, setRoundUpTo] = useState(50);
@@ -46,12 +79,7 @@ export default function SavingsPage() {
     });
   }, [streakView.dates]);
 
-  const projectedCost = (goal: typeof savingsGoals[number]) => {
-    if (!goal.targetDate) return null;
-    const years = (new Date(goal.targetDate).getTime() - Date.now()) / (365 * 86400000);
-    if (years < 0.1) return null;
-    return goal.targetAmountInKobo * Math.pow(1 + inflationRate / 100, years);
-  };
+  const emptyForm = { name: '', targetAmount: '', contributionPerCycle: '', targetDate: '', savingsType: 'target' as SavingsType, withdrawalDate: '' };
 
   const handleAdd = () => {
     if (!form.name || !form.targetAmount) return;
@@ -59,14 +87,47 @@ export default function SavingsPage() {
       userId: 'user', name: form.name, targetAmountInKobo: nairaToKobo(Number(form.targetAmount)), currentAmountInKobo: 0,
       targetDate: form.targetDate || undefined, contributionPerCycleInKobo: nairaToKobo(Number(form.contributionPerCycle)) || 100000,
       contributionFrequency: 'monthly', isPaused: false,
+      savingsType: form.savingsType, withdrawalDate: form.withdrawalDate || undefined,
     });
-    setForm({ name: '', targetAmount: '', contributionPerCycle: '', targetDate: '' });
+    setForm(emptyForm);
     setShowAdd(false);
   };
 
   const handleContribute = (id: string) => {
     const n = Number(amount);
     if (n > 0) { addToSavingsGoal(id, nairaToKobo(n)); setAmount(''); setContributeId(null); }
+  };
+
+  const startEdit = (goal: SavingsGoal) => {
+    setContributeId(null);
+    setEditId(goal.id);
+    setEditForm({
+      name: goal.name,
+      targetAmount: String(koboToNaira(goal.targetAmountInKobo)),
+      contributionPerCycle: String(koboToNaira(goal.contributionPerCycleInKobo)),
+      targetDate: goal.targetDate ? goal.targetDate.slice(0, 10) : '',
+      savingsType: goal.savingsType || 'target',
+      withdrawalDate: goal.withdrawalDate ? goal.withdrawalDate.slice(0, 10) : '',
+    });
+  };
+
+  const saveEdit = () => {
+    if (!editId) return;
+    const goal = savingsGoals.find(g => g.id === editId);
+    if (!goal) return;
+    const target = nairaToKobo(Number(editForm.targetAmount) || 0);
+    if (target <= 0) return;
+    updateSavingsGoal(editId, {
+      name: editForm.name.trim() || goal.name,
+      targetAmountInKobo: target,
+      currentAmountInKobo: Math.min(goal.currentAmountInKobo, target),
+      contributionPerCycleInKobo: nairaToKobo(Number(editForm.contributionPerCycle) || 0),
+      targetDate: editForm.targetDate ? new Date(editForm.targetDate).toISOString() : undefined,
+      savingsType: editForm.savingsType,
+      withdrawalDate: editForm.withdrawalDate ? new Date(editForm.withdrawalDate).toISOString() : undefined,
+      progress: Math.min(100, (Math.min(goal.currentAmountInKobo, target) / target) * 100),
+    });
+    setEditId(null);
   };
 
   const handleToggleRoundUp = async (enabled: boolean) => {
@@ -124,7 +185,7 @@ export default function SavingsPage() {
 
   return (
     <div>
-      <Header title="Savings Goals" showBack />
+      <Header title="Savings Goals" />
 
       <div className="px-5 pt-5 space-y-5 lg:px-10 lg:pt-10">
         {/* Header */}
@@ -139,55 +200,32 @@ export default function SavingsPage() {
           </button>
         </div>
 
-        {/* Streak + total + inflation assumption */}
-        <div className="grid gap-3 lg:grid-cols-3">
-          <div className="grid grid-cols-2 gap-3 lg:col-span-2">
-            <div className="card p-4">
-              <p className="text-xs text-surface-500 mb-1">Total saved</p>
-              <p className="text-lg font-bold text-navy-900">{formatNaira(totalSaved)}</p>
-              <div className="h-1.5 bg-surface-100 rounded-full mt-2 overflow-hidden">
-                <div className="h-full bg-primary-500 rounded-full" style={{ width: `${totalTarget ? (totalSaved / totalTarget) * 100 : 0}%` }} />
-              </div>
-            </div>
-            <button onClick={() => document.getElementById('streak-card')?.scrollIntoView({ behavior: 'smooth', block: 'center' })} className="card p-4 flex items-center gap-3 text-left active:scale-[0.99] transition-transform">
-              <span className="w-10 h-10 bg-amber-50 rounded-xl flex items-center justify-center shrink-0">
-                <Flame size={19} className="text-amber-500" />
-              </span>
-              <span className="min-w-0">
-                <span className="block text-lg font-bold text-navy-900 leading-tight">{streakView.current}</span>
-                <span className="block text-xs text-surface-500">day streak<span className="hidden sm:inline"> · best {streakView.longest}</span></span>
-              </span>
-              <ChevronRight size={16} className="text-surface-300 ml-auto shrink-0" />
-            </button>
-          </div>
-
+        {/* Streak + total */}
+        <div className="grid grid-cols-2 gap-3">
           <div className="card p-4">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 bg-amber-50 rounded-xl flex items-center justify-center shrink-0">
-                <Percent size={16} className="text-amber-600" />
-              </div>
-              <div className="flex-1 min-w-0">
-                <p className="text-sm font-semibold text-navy-900">Prices rise by</p>
-                <p className="text-[11px] text-surface-500">Your own guess — not an official forecast.</p>
-              </div>
-              <div className="flex items-center gap-1 shrink-0">
-                <button onClick={() => setInflationRate(inflationRate - 1)} aria-label="Lower price-rise assumption" className="w-8 h-8 rounded-lg bg-surface-100 flex items-center justify-center active:scale-95 transition-transform">
-                  <Minus size={14} className="text-navy-800" />
-                </button>
-                <span className="w-12 text-center text-sm font-bold text-navy-900">{inflationRate}%/yr</span>
-                <button onClick={() => setInflationRate(inflationRate + 1)} aria-label="Raise price-rise assumption" className="w-8 h-8 rounded-lg bg-surface-100 flex items-center justify-center active:scale-95 transition-transform">
-                  <Plus size={14} className="text-navy-800" />
-                </button>
-              </div>
+            <p className="text-xs text-surface-500 mb-1">Total saved</p>
+            <p className="text-lg font-bold text-navy-900">{formatNaira(totalSaved)}</p>
+            <div className="h-1.5 bg-surface-100 rounded-full mt-2 overflow-hidden">
+              <div className="h-full bg-primary-500 rounded-full" style={{ width: `${totalTarget ? (totalSaved / totalTarget) * 100 : 0}%` }} />
             </div>
           </div>
+          <button onClick={() => document.getElementById('streak-card')?.scrollIntoView({ behavior: 'smooth', block: 'center' })} className="card p-4 flex items-center gap-3 text-left active:scale-[0.99] transition-transform">
+            <span className="w-10 h-10 bg-amber-50 rounded-xl flex items-center justify-center shrink-0">
+              <Flame size={19} className="text-amber-500" />
+            </span>
+            <span className="min-w-0">
+              <span className="block text-lg font-bold text-navy-900 leading-tight">{streakView.current}</span>
+              <span className="block text-xs text-surface-500">day streak<span className="hidden sm:inline"> · best {streakView.longest}</span></span>
+            </span>
+            <ChevronRight size={16} className="text-surface-300 ml-auto shrink-0" />
+          </button>
         </div>
 
         {/* Streak detail */}
         <div id="streak-card" className="card p-5">
           <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-3 mb-4">
             <div className="flex-1 min-w-[190px]">
-              <p className="text-[11px] font-semibold tracking-wider text-amber-600 uppercase mb-1">Saving streak</p>
+              <p className="text-[11px] font-semibold tracking-wider text-amber-600 uppercase mb-1">Money streak</p>
               <h3 className="font-bold text-navy-900">
                 {streakView.current > 0
                   ? `${streakView.current} day${streakView.current === 1 ? '' : 's'} in a row`
@@ -196,11 +234,11 @@ export default function SavingsPage() {
               <p className="text-xs text-surface-500 mt-0.5">
                 {streakView.current > 0
                   ? (streakView.activeToday
-                    ? 'Today is covered. Add to any goal tomorrow to keep it going.'
-                    : 'Add something to a goal today before midnight to keep it alive.')
+                    ? 'Today is covered. Fund a goal or finish a lesson tomorrow to keep it going.'
+                    : 'Fund a goal or finish a money lesson today to keep it alive.')
                   : streakView.dates.length
-                    ? `Your last saving day was ${streakView.daysSinceLast} day${streakView.daysSinceLast === 1 ? '' : 's'} ago. Start again with any amount.`
-                    : 'Save anything, any day, and the count starts.'}
+                    ? `Your last active day was ${streakView.daysSinceLast} day${streakView.daysSinceLast === 1 ? '' : 's'} ago. Any amount, or one lesson, starts it again.`
+                    : 'Save anything or learn something, any day, and the count starts.'}
               </p>
             </div>
             <div className="flex gap-5 shrink-0 text-right">
@@ -224,8 +262,8 @@ export default function SavingsPage() {
                 {last30.map(d => (
                   <span
                     key={d.key}
-                    title={`${d.label}${d.isHit ? ' · saved' : ''}`}
-                    aria-label={`${d.label}, ${d.isHit ? 'contribution recorded' : 'no contribution'}`}
+                    title={`${d.label}${d.isHit ? ' · counted' : ''}`}
+                    aria-label={`${d.label}, ${d.isHit ? 'day counted' : 'no saving or lesson'}`}
                     className={`aspect-square rounded-md ${d.isHit ? 'bg-amber-400' : 'bg-surface-100'} ${d.isToday ? 'ring-2 ring-navy-800 ring-offset-1' : ''}`}
                   />
                 ))}
@@ -272,11 +310,19 @@ export default function SavingsPage() {
           <div className="card p-4 space-y-3 animate-slide-up">
             <h3 className="font-bold text-navy-900">New savings goal</h3>
             <input type="text" placeholder="Goal name (e.g. New phone)" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className="input-field text-sm" />
+            <SavingsTypePicker value={form.savingsType} onChange={savingsType => setForm({ ...form, savingsType })} />
             <div className="grid grid-cols-2 gap-3">
               <input type="number" placeholder="Target (₦)" value={form.targetAmount} onChange={(e) => setForm({ ...form, targetAmount: e.target.value })} className="input-field text-sm" />
               <input type="number" placeholder="Per cycle (₦)" value={form.contributionPerCycle} onChange={(e) => setForm({ ...form, contributionPerCycle: e.target.value })} className="input-field text-sm" />
             </div>
-            <input type="date" value={form.targetDate} onChange={(e) => setForm({ ...form, targetDate: e.target.value })} className="input-field text-sm" />
+            <label className="block text-[11px] font-semibold text-navy-900">
+              <span className="font-normal text-surface-500">Reach the target by (optional)</span>
+              <input type="date" value={form.targetDate} onChange={(e) => setForm({ ...form, targetDate: e.target.value })} className="input-field text-sm mt-1" />
+            </label>
+            <label className="block text-[11px] font-semibold text-navy-900">
+              <span className="font-normal text-surface-500">Plan to take it out on (optional)</span>
+              <input type="date" value={form.withdrawalDate} onChange={(e) => setForm({ ...form, withdrawalDate: e.target.value })} className="input-field text-sm mt-1" />
+            </label>
             <div className="flex gap-2">
               <button onClick={handleAdd} className="btn-primary flex-1 text-sm py-2.5">Create goal</button>
               <button onClick={() => setShowAdd(false)} className="btn-ghost text-sm">Cancel</button>
@@ -289,8 +335,7 @@ export default function SavingsPage() {
           {savingsGoals.map((goal, i) => {
             const Icon = goalIcon(i);
             const isTinted = i % 2 === 0;
-            const projected = projectedCost(goal);
-            const gapToTarget = (projected ?? goal.targetAmountInKobo) - goal.currentAmountInKobo;
+            const gapToTarget = goal.targetAmountInKobo - goal.currentAmountInKobo;
             const cycleDays = { daily: 1, weekly: 7, monthly: 30.44 }[goal.contributionFrequency];
             const cycleName = goal.contributionFrequency;
             const cyclesLeft = goal.targetDate
@@ -298,6 +343,9 @@ export default function SavingsPage() {
               : null;
             const neededPerCycle = cyclesLeft && gapToTarget > 0 ? Math.ceil(gapToTarget / cyclesLeft / 50) * 50 : null;
             const behindPlan = neededPerCycle !== null && neededPerCycle > goal.contributionPerCycleInKobo;
+            const daysToWithdrawal = goal.withdrawalDate
+              ? Math.ceil((new Date(goal.withdrawalDate).getTime() - Date.now()) / 86400000)
+              : null;
             return (
               <div key={goal.id} className="card p-5">
                 <div className={`h-20 rounded-xl mb-4 flex items-center justify-center ${isTinted ? 'bg-primary-50' : 'bg-emerald-50'}`}>
@@ -305,9 +353,15 @@ export default function SavingsPage() {
                 </div>
                 <div className="flex items-start justify-between mb-1">
                   <h3 className="font-bold text-navy-900">{goal.name}</h3>
-                  <span className="font-bold text-primary-600">{Math.round(goal.progress)}%</span>
+                  {gapToTarget <= 0
+                    ? <span className="badge badge-success">Target reached</span>
+                    : <span className="font-bold text-primary-600">{Math.round(goal.progress)}%</span>}
                 </div>
-                <p className="text-xs text-surface-500 mb-3">Target · {goal.targetDate ? formatDateShort(goal.targetDate) : 'Flexible'}</p>
+                <p className="text-xs text-surface-500 mb-3">
+                  {savingsTypeLabel(goal.savingsType)}
+                  {goal.targetDate ? ` · reach by ${formatDateShort(goal.targetDate)}` : ' · no deadline'}
+                  {goal.withdrawalDate ? ` · withdraw ${formatDateShort(goal.withdrawalDate)}` : ''}
+                </p>
                 <div className="h-2 bg-surface-100 rounded-full overflow-hidden mb-2">
                   <div className="h-full bg-emerald-500 rounded-full transition-all duration-500" style={{ width: `${goal.progress}%` }} />
                 </div>
@@ -316,16 +370,12 @@ export default function SavingsPage() {
                   <span className="text-surface-500"> of {formatNaira(goal.targetAmountInKobo)}</span>
                 </p>
 
-                {/* Inflation-aware target */}
-                {projected !== null && goal.targetDate && (
-                  <div className="bg-amber-50 border border-amber-100 rounded-xl p-3 mb-4">
-                    <p className="text-xs text-amber-900">
-                      At {inflationRate}%/yr this may cost <b>{formatNaira(Math.round(projected))}</b> by {formatDateShort(goal.targetDate)} —{' '}
-                      {projected > goal.currentAmountInKobo
-                        ? <>roughly <b>{formatNaira(Math.round(projected - goal.currentAmountInKobo))}</b> more than you have saved.</>
-                        : 'you are covered even if prices rise.'}
-                    </p>
-                  </div>
+                {daysToWithdrawal !== null && (
+                  <p className={`text-[11px] mb-4 -mt-2 ${daysToWithdrawal < 0 ? 'text-amber-600' : 'text-surface-500'}`}>
+                    {daysToWithdrawal >= 0
+                      ? `${daysToWithdrawal} day${daysToWithdrawal === 1 ? '' : 's'} until this money is meant to be used.`
+                      : `Planned withdrawal passed ${Math.abs(daysToWithdrawal)} day${Math.abs(daysToWithdrawal) === 1 ? '' : 's'} ago — raise the target or set a new date.`}
+                  </p>
                 )}
 
                 {/* Pace check, from this goal's own numbers */}
@@ -340,7 +390,37 @@ export default function SavingsPage() {
                   </div>
                 )}
 
-                {contributeId === goal.id ? (
+                {editId === goal.id ? (
+                  <div className="space-y-2.5 mb-1 bg-surface-50 rounded-xl p-3">
+                    <label className="block text-[11px] font-semibold text-navy-900">
+                      Goal name
+                      <input value={editForm.name} onChange={e => setEditForm({ ...editForm, name: e.target.value })} className="input-field text-sm py-2 mt-1" />
+                    </label>
+                    <SavingsTypePicker value={editForm.savingsType} onChange={savingsType => setEditForm({ ...editForm, savingsType })} />
+                    <div className="grid grid-cols-2 gap-2">
+                      <label className="block text-[11px] font-semibold text-navy-900">
+                        Target (₦)
+                        <input type="number" inputMode="decimal" value={editForm.targetAmount} onChange={e => setEditForm({ ...editForm, targetAmount: e.target.value })} className="input-field text-sm py-2 mt-1" />
+                      </label>
+                      <label className="block text-[11px] font-semibold text-navy-900">
+                        Per {cycleName} (₦)
+                        <input type="number" inputMode="decimal" value={editForm.contributionPerCycle} onChange={e => setEditForm({ ...editForm, contributionPerCycle: e.target.value })} className="input-field text-sm py-2 mt-1" />
+                      </label>
+                    </div>
+                    <label className="block text-[11px] font-semibold text-navy-900">
+                      Target date
+                      <input type="date" value={editForm.targetDate} onChange={e => setEditForm({ ...editForm, targetDate: e.target.value })} className="input-field text-sm py-2 mt-1" />
+                    </label>
+                    <label className="block text-[11px] font-semibold text-navy-900">
+                      Withdrawal date
+                      <input type="date" value={editForm.withdrawalDate} onChange={e => setEditForm({ ...editForm, withdrawalDate: e.target.value })} className="input-field text-sm py-2 mt-1" />
+                    </label>
+                    <div className="flex gap-2">
+                      <button onClick={saveEdit} className="btn-primary flex-1 text-sm py-2.5">Save changes</button>
+                      <button onClick={() => setEditId(null)} className="btn-ghost text-sm">Cancel</button>
+                    </div>
+                  </div>
+                ) : contributeId === goal.id ? (
                   <div className="flex gap-2 mb-1">
                     <input type="number" placeholder="Amount" value={amount} onChange={(e) => setAmount(e.target.value)} className="input-field text-sm py-2" autoFocus />
                     <button onClick={() => handleContribute(goal.id)} className="btn-primary text-sm px-4">Add</button>
@@ -348,8 +428,12 @@ export default function SavingsPage() {
                   </div>
                 ) : (
                   <div className="flex gap-2">
-                    <button onClick={() => updateSavingsGoal(goal.id, { contributionPerCycleInKobo: Math.max(0, goal.contributionPerCycleInKobo - 50000) })} className="btn-secondary flex-1 text-sm py-2.5">Adjust</button>
-                    <button onClick={() => setContributeId(goal.id)} className="btn-primary flex-1 text-sm py-2.5">Add money</button>
+                    <button onClick={() => startEdit(goal)} className="btn-secondary flex-1 text-sm py-2.5">Edit goal</button>
+                    {gapToTarget > 0 ? (
+                      <button onClick={() => setContributeId(goal.id)} className="btn-primary flex-1 text-sm py-2.5">Add money</button>
+                    ) : (
+                      <button onClick={() => startEdit(goal)} className="btn-primary flex-1 text-sm py-2.5">Raise target</button>
+                    )}
                   </div>
                 )}
 

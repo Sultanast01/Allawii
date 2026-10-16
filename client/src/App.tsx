@@ -17,6 +17,8 @@ import SpendPage from './pages/SpendPage';
 import StatisticsPage from './pages/StatisticsPage';
 import PatternsPage from './pages/PatternsPage';
 import SavingsPage from './pages/SavingsPage';
+import AdaptivePage from './pages/AdaptivePage';
+import NotificationsPage from './pages/NotificationsPage';
 import CoachPage from './pages/CoachPage';
 import ProfilePage from './pages/ProfilePage';
 import AddExpensePage from './pages/AddExpensePage';
@@ -32,7 +34,7 @@ import BMoniWalletPage from './pages/BMoniWalletPage';
 import KycVerificationPage from './pages/KycVerificationPage';
 import HelpPage from './pages/HelpPage';
 
-const hideNavPaths = ['/login', '/signup', '/setup', '/add-expense', '/afford', '/what-if', '/receipt', '/profile', '/offers', '/literacy', '/calendar', '/groups', '/scam', '/bmoni', '/bmoni/kyc', '/statistics', '/patterns', '/help'];
+const hideNavPaths = ['/login', '/signup', '/setup', '/add-expense', '/afford', '/what-if', '/receipt', '/profile', '/offers', '/literacy', '/calendar', '/groups', '/scam', '/bmoni', '/bmoni/kyc', '/statistics', '/patterns', '/help', '/adaptive', '/notifications'];
 
 function AppRoutes() {
   const { isAuthenticated, isDemoMode, textScale } = useStore();
@@ -65,6 +67,8 @@ function AppRoutes() {
           <Route path="/statistics" element={<StatisticsPage />} />
           <Route path="/patterns" element={<PatternsPage />} />
           <Route path="/savings" element={<SavingsPage />} />
+          <Route path="/adaptive" element={<AdaptivePage />} />
+          <Route path="/notifications" element={<NotificationsPage />} />
           <Route path="/coach" element={<CoachPage />} />
           <Route path="/profile" element={<ProfilePage />} />
           <Route path="/add-expense" element={<AddExpensePage />} />

@@ -1,6 +1,8 @@
 import type { SessionProfile } from '../context/store';
 
 const TOKEN_KEY = 'allowii-token';
+const REFRESH_KEY = 'allowii-refresh';
+const EXPIRES_KEY = 'allowii-token-exp';
 
 async function postJson(path: string, body?: unknown, token?: string) {
   const res = await fetch(path, {
@@ -17,71 +19,118 @@ export function getStoredToken(): string | null {
 
 export function clearSession() {
   localStorage.removeItem(TOKEN_KEY);
+  localStorage.removeItem(REFRESH_KEY);
+  localStorage.removeItem(EXPIRES_KEY);
 }
 
-/** Real credentials. `remember` decides how long the issued session stays valid. */
-export async function login(email: string, password: string, remember: boolean): Promise<SessionProfile> {
-  const { ok, data } = await postJson('/api/auth/login', { email, password, remember });
-  if (!ok || !data?.token) throw new Error(data?.error || 'Login failed');
+/** The server proxies Supabase Auth, so sessions carry a refresh token and a 1h expiry. */
+function storeSession(data: { token?: string; refreshToken?: string; expiresIn?: number }) {
+  if (!data?.token) return;
   localStorage.setItem(TOKEN_KEY, data.token);
+  if (data.refreshToken) localStorage.setItem(REFRESH_KEY, data.refreshToken);
+  if (data.expiresIn) localStorage.setItem(EXPIRES_KEY, String(Date.now() + data.expiresIn * 1000));
+}
+
+let refreshInFlight: Promise<string | null> | null = null;
+
+async function refreshSession(): Promise<string | null> {
+  const refreshToken = localStorage.getItem(REFRESH_KEY);
+  if (!refreshToken) return null;
+  if (!refreshInFlight) {
+    refreshInFlight = postJson('/api/auth/refresh', { refreshToken })
+      .then(({ ok, data }) => {
+        if (!ok || !data?.token) {
+          clearSession();
+          return null;
+        }
+        storeSession(data);
+        return data.token as string;
+      })
+      .catch(() => null)
+      .finally(() => { refreshInFlight = null; });
+  }
+  return refreshInFlight;
+}
+
+/** Real credentials, verified by Supabase Auth through the backend. */
+export async function login(email: string, password: string, _remember: boolean): Promise<SessionProfile> {
+  const { ok, data } = await postJson('/api/auth/login', { email, password });
+  if (!ok || !data?.token) throw new Error(data?.error || 'Login failed');
+  storeSession(data);
   return data.user as SessionProfile;
 }
 
 export async function register(payload: { name: string; email: string; password: string; university?: string; phoneNumber?: string }): Promise<SessionProfile> {
   const { ok, data } = await postJson('/api/auth/register', payload);
   if (!ok || !data?.token) throw new Error(data?.error || 'Registration failed');
-  localStorage.setItem(TOKEN_KEY, data.token);
+  storeSession(data);
   return data.user as SessionProfile;
 }
 
-/** Demo users get a real server session so backend routes stay authenticated. */
+/** Demo users get a real Supabase session so backend routes stay authenticated. */
 export async function getSessionToken(): Promise<string> {
   const cached = getStoredToken();
-  if (cached) return cached;
+  const expiresAt = Number(localStorage.getItem(EXPIRES_KEY) || 0);
+  if (cached) {
+    if (!expiresAt || Date.now() < expiresAt - 60_000) return cached;
+    const refreshed = await refreshSession();
+    if (refreshed) return refreshed;
+  }
 
   const { ok, data } = await postJson('/api/auth/demo-session');
   if (!ok || !data?.token) throw new Error(data?.error || 'Backend unavailable');
-  localStorage.setItem(TOKEN_KEY, data.token);
+  storeSession(data);
   return data.token;
 }
 
-export async function apiGet(path: string) {
+/** Authenticated fetch: transparently refreshes the Supabase session once on 401. */
+async function authFetch(path: string, init: RequestInit, retryOn401 = true): Promise<Response> {
   const token = await getSessionToken();
-  const res = await fetch(`/api${path}`, { headers: { Authorization: `Bearer ${token}` } });
+  const res = await fetch(path, {
+    ...init,
+    headers: { ...init.headers, Authorization: `Bearer ${token}` },
+  });
+  if (res.status === 401 && retryOn401) {
+    const refreshed = await refreshSession();
+    if (refreshed) {
+      return authFetch(path, { ...init, headers: { ...init.headers, Authorization: `Bearer ${refreshed}` } }, false);
+    }
+  }
+  return res;
+}
+
+async function readJson(res: Response) {
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data?.error || `Request failed (${res.status})`);
   return data;
+}
+
+export async function apiGet(path: string) {
+  return readJson(await authFetch(`/api${path}`, { headers: {} }));
 }
 
 export async function apiPost(path: string, body?: unknown) {
-  const token = await getSessionToken();
-  const out = await postJson(`/api${path}`, body, token);
-  if (!out.ok) throw new Error(out.data?.error || `Request failed (${out.status})`);
-  return out.data;
+  return readJson(await authFetch(`/api${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: body ? JSON.stringify(body) : undefined,
+  }));
 }
 
 export async function apiPut(path: string, body?: unknown) {
-  const token = await getSessionToken();
-  const res = await fetch(`/api${path}`, {
+  return readJson(await authFetch(`/api${path}`, {
     method: 'PUT',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    headers: { 'Content-Type': 'application/json' },
     body: body ? JSON.stringify(body) : undefined,
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data?.error || `Request failed (${res.status})`);
-  return data;
+  }));
 }
 
 export async function apiPatch(path: string, body?: unknown) {
-  const token = await getSessionToken();
-  const res = await fetch(`/api${path}`, {
+  return readJson(await authFetch(`/api${path}`, {
     method: 'PATCH',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    headers: { 'Content-Type': 'application/json' },
     body: body ? JSON.stringify(body) : undefined,
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data?.error || `Request failed (${res.status})`);
-  return data;
+  }));
 }
 
 export async function apiUpload(path: string, form: FormData) {
@@ -91,9 +140,7 @@ export async function apiUpload(path: string, form: FormData) {
     headers: { Authorization: `Bearer ${token}` },
     body: form,
   });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data?.error || `Upload failed (${res.status})`);
-  return data;
+  return readJson(res);
 }
 
 export const bmoni = {
@@ -127,4 +174,9 @@ export const roundUp = {
   getStatus: () => apiGet('/round-up/status'),
   calculate: () => apiPost('/round-up/calculate'),
   sweep: () => apiPost('/round-up/sweep'),
+};
+
+export const telegramBot = {
+  status: () => apiGet('/bot/user/status'),
+  newLinkCode: () => apiPost('/bot/user/link-code'),
 };

@@ -43,7 +43,7 @@ export default function AddExpensePage() {
   if (showSuccess) {
     return (
       <>
-        <Header title="Add Transaction" showBack />
+        <Header title="Add Transaction" />
         <div className="flex items-center justify-center py-32">
           <div className="text-center animate-scale-in">
             <div className="w-16 h-16 bg-primary-50 rounded-full flex items-center justify-center mx-auto mb-4">
@@ -59,7 +59,7 @@ export default function AddExpensePage() {
 
   return (
     <>
-      <Header title="Add Transaction" showBack />
+      <Header title="Add Transaction" />
 
       <div className="px-5 py-4 space-y-5 pb-8 lg:px-10 lg:max-w-3xl">
         <div className="flex gap-2 bg-surface-100 p-1 rounded-xl">

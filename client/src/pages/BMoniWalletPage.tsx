@@ -51,6 +51,7 @@ export default function BMoniWalletPage() {
   const [rate, setRate] = useState<any | null>(null);
   const [banks, setBanks] = useState<{ bankName: string; bankCode: string }[]>([]);
   const [busy, setBusy] = useState(false);
+  const [linking, setLinking] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const [bankQuery, setBankQuery] = useState('');
@@ -88,7 +89,23 @@ export default function BMoniWalletPage() {
 
   const loadAll = useCallback(async () => {
     setError(null);
-    const status = await bmoni.status();
+    let status: Sandbox | null = null;
+    try {
+      status = await bmoni.status();
+    } catch {
+      status = null;
+    }
+    if (!status?.bmoniUserId) {
+      // A sandbox identity is a dev fixture built from synthetic details, so linking it is
+      // the default state of this page instead of a decision the user has to make first.
+      setLinking(true);
+      try {
+        await bmoni.connect();
+        status = await bmoni.status();
+      } finally {
+        setLinking(false);
+      }
+    }
     setSandbox(status);
     const [r, b, bal, dep] = await Promise.all([
       apiGet('/bmoni/rate?to=USD').catch(() => null),
@@ -103,7 +120,10 @@ export default function BMoniWalletPage() {
   }, []);
 
   useEffect(() => {
-    loadAll().catch(() => setSandbox(null));
+    loadAll().catch((e: any) => {
+      setSandbox(null);
+      setError(e?.message || 'The sandbox identity could not be linked.');
+    });
   }, [loadAll]);
 
   const connectSandbox = async () => {
@@ -210,7 +230,7 @@ export default function BMoniWalletPage() {
 
   return (
     <div>
-      <Header title="B Moni Sandbox" showBack />
+      <Header title="B Moni Sandbox" />
 
       <div className="px-5 pt-5 pb-8 space-y-4 lg:px-10 lg:max-w-5xl">
         <div>
@@ -226,14 +246,23 @@ export default function BMoniWalletPage() {
             <div className="w-16 h-16 bg-primary-50 rounded-2xl flex items-center justify-center mx-auto mb-4">
               <Link2 size={28} className="text-primary-600" />
             </div>
-            <h2 className="font-bold text-navy-900 text-lg mb-1">Link a sandbox identity</h2>
+            <h2 className="font-bold text-navy-900 text-lg mb-1">Linking your sandbox identity</h2>
             <p className="text-sm text-surface-500 mb-5 max-w-xs mx-auto">
               Creates a test user on B Moni&apos;s development environment with synthetic details.
               No BVN, no real money, no production data.
             </p>
-            <button onClick={connectSandbox} disabled={busy} className="btn-primary w-full flex items-center justify-center gap-2 disabled:opacity-60">
-              {busy ? <><Loader2 size={17} className="animate-spin" /> Connecting...</> : <>Connect sandbox</>}
-            </button>
+            {error ? (
+              <>
+                <p role="alert" className="text-xs text-red-600 mb-3">{error}</p>
+                <button onClick={connectSandbox} disabled={busy} className="btn-primary w-full flex items-center justify-center gap-2 disabled:opacity-60">
+                  {busy ? <><Loader2 size={17} className="animate-spin" /> Retrying...</> : <>Try again</>}
+                </button>
+              </>
+            ) : (
+              <p className="flex items-center justify-center gap-2 text-sm text-surface-500">
+                <Loader2 size={16} className="animate-spin" /> {linking ? 'Creating the sandbox user...' : 'Checking for a linked identity...'}
+              </p>
+            )}
           </div>
         ) : (
           <>

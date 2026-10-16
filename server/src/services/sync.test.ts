@@ -6,7 +6,7 @@ function row(id: string, updatedAt: string, extra: Record<string, unknown> = {})
   return { id, userId: 'u1', updatedAt, ...extra };
 }
 
-describe('Ledger merge for app <-> WhatsApp sync', () => {
+describe('Ledger merge for app <-> Telegram sync', () => {
   test('unknown ids are inserted', () => {
     const plan = planLedgerMerge([], [row('t1', '2026-10-15T10:00:00.000Z')], []);
     assert.deepEqual(plan.writes.map(w => w.id), ['t1']);

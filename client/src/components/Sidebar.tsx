@@ -2,14 +2,16 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { useStore } from '../context/store';
 import {
   Home, ArrowLeftRight, BarChart3, Cloud, User, Plus, ScanLine, ShoppingCart,
-  TrendingUp, CalendarDays, Users, Tag, BookOpen, ShieldAlert, Wallet2, LogOut, Settings, Fingerprint, MessageCircle, HelpCircle,
+  TrendingUp, CalendarDays, Users, Tag, BookOpen, ShieldAlert, Wallet2, LogOut, Settings, Fingerprint, Bell, RefreshCw, SlidersHorizontal,
 } from 'lucide-react';
 import { formatNaira } from '../utils';
+import { countUnreadAlerts } from '../utils/alerts';
 
 const primary = [
   { path: '/', icon: Home, label: 'Home' },
   { path: '/spend', icon: ArrowLeftRight, label: 'Activity' },
   { path: '/statistics', icon: BarChart3, label: 'Insights' },
+  { path: '/budget', icon: SlidersHorizontal, label: 'My budget' },
   { path: '/savings', icon: Cloud, label: 'Savings' },
   { path: '/profile', icon: User, label: 'Profile' },
 ];
@@ -19,11 +21,13 @@ const tools = [
   { path: '/receipt', icon: ScanLine, label: 'Scan receipt' },
   { path: '/afford', icon: ShoppingCart, label: 'Can I afford it?' },
   { path: '/what-if', icon: TrendingUp, label: 'What-if simulator' },
+  { path: '/adaptive', icon: RefreshCw, label: 'Adaptive budgeting' },
   { path: '/statistics', icon: BarChart3, label: 'Statistics' },
   { path: '/patterns', icon: Fingerprint, label: 'Spending patterns' },
 ];
 
 const more = [
+  { path: '/notifications', icon: Bell, label: 'Notifications' },
   { path: '/calendar', icon: CalendarDays, label: 'Calendar' },
   { path: '/groups', icon: Users, label: 'Groups' },
   { path: '/offers', icon: Tag, label: 'Student deals' },
@@ -62,9 +66,10 @@ function Group({ title, items }: { title?: string; items: typeof primary }) {
 
 export default function Sidebar() {
   const navigate = useNavigate();
-  const { user, isDemoMode, logout, getSafeToSpend, insights } = useStore();
+  const state = useStore();
+  const { user, isDemoMode, logout, getSafeToSpend } = state;
   const safe = getSafeToSpend();
-  const unread = insights.filter(i => !i.isRead).length;
+  const unread = countUnreadAlerts(state);
 
   return (
     <aside className="hidden lg:flex lg:w-72 lg:shrink-0 lg:h-screen lg:sticky lg:top-0 lg:flex-col bg-gradient-to-b from-navy-900 via-navy-900 to-navy-950 text-white px-5 py-7 border-r border-white/5">
