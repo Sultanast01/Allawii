@@ -4,7 +4,7 @@ Allawii helps a Nigerian university student answer one question at any moment: *
 
 Built for the B Moni × TINC26 hackathon. Mobile-first, offline-first, sandbox-only — no real money moves anywhere in the app.
 
-## Quick Start
+## Quick Start.
 
 ```bash
 npm run install:all   # root + client + server dependencies
